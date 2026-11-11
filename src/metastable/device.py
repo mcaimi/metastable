@@ -28,7 +28,7 @@ pure auto-detection. Generators also accept an explicit DeviceSettings
 instance for per-object overrides.
 
 `gfx_override` exists for AMD cards that are absent from the official ROCm
-support matrix (e.g. RX 5500 XT / Navi 14 is gfx1034): setting it to "10.3.0"
+support matrix (e.g. RX 6700 XT / Navi 14 is gfx1031): setting it to "10.3.0"
 makes the HSA runtime present the card as gfx1030. The variable must be set
 before the first HIP initialization, so configure_device() must run before
 any other torch.cuda call in the process.
