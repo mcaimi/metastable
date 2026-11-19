@@ -67,6 +67,18 @@ image, meta = gen.forward("a fox", "", "FlowMatch Euler", 28, 1024, 1024, 3.5, 4
                           true_cfg_scale=1.0)
 ```
 
+The text encoders, VAE and scheduler in `components_dir` are loaded once and
+shared by every Flux pipeline. Before LoRAs are fused, a pipeline gets its own
+copy of each component a LoRA can modify (the CLIP text encoder), so fused
+weights never leak into other pipelines. T5 and the VAE stay shared.
+
+Because modules are shared, every generator using the same `components_dir`
+shares one lock (`gen.lock`): generations, LoRA fusion and placement changes
+on any of them run one at a time, and concurrent requests queue up. Use
+`gen.lock.acquire(blocking=False)` to report "busy" instead. Single-file
+generators (SD 1.5, SDXL, Illustrious) only serialize calls on the same
+generator.
+
 Inpainting:
 
 ```python
