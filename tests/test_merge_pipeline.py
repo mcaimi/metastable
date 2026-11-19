@@ -11,15 +11,19 @@ from metastable.merge import pipeline as mp
 from metastable.merge.ops import MergeConfig
 from metastable.merge.pipeline import (
     ARCHITECTURES,
+    FluxMergePipeline,
     IllustriousMergePipeline,
     MergePipeline,
     SD15MergePipeline,
     SDXLMergePipeline,
+    ZImageMergePipeline,
 )
 from metastable.pipelines import (
+    FluxPipelineGenerator,
     IllustriousPipelineGenerator,
     SD15PipelineGenerator,
     SDXLPipelineGenerator,
+    ZImagePipelineGenerator,
 )
 
 
@@ -31,15 +35,17 @@ def cpu_configured():
 # architectures ---------------------------------------------------------------------------
 
 def test_architectures_registry():
-    assert list(ARCHITECTURES) == ["sd15", "sdxl", "illustrious"]
-    assert "flux" not in ARCHITECTURES
-    assert not any(arch.transformer_only or arch.layouts for arch in ARCHITECTURES.values())
+    assert list(ARCHITECTURES) == ["sd15", "sdxl", "illustrious", "flux", "zimage"]
+    assert not any(ARCHITECTURES[n].transformer_only for n in ("sd15", "sdxl", "illustrious"))
+    assert all(ARCHITECTURES[n].transformer_only for n in ("flux", "zimage"))
 
 
 @pytest.mark.parametrize("name,gen,base_res", [
     ("sd15", SD15PipelineGenerator, 512),
     ("sdxl", SDXLPipelineGenerator, 1024),
     ("illustrious", IllustriousPipelineGenerator, 1024),
+    ("flux", FluxPipelineGenerator, 1024),
+    ("zimage", ZImagePipelineGenerator, 1024),
 ])
 def test_architecture_resolutions_match_generators(name, gen, base_res):
     arch = ARCHITECTURES[name]
@@ -69,14 +75,15 @@ def test_rocm_device_maps_to_cuda_api(monkeypatch):
 
 @pytest.mark.parametrize("cls,name", [
     (SD15MergePipeline, "sd15"), (SDXLMergePipeline, "sdxl"), (IllustriousMergePipeline, "illustrious"),
+    (FluxMergePipeline, "flux"), (ZImageMergePipeline, "zimage"),
 ])
 def test_convenience_classes(cls, name):
     assert cls(device="cpu").architecture.name == name
 
 
-def test_for_model_type_rejects_flux():
-    with pytest.raises(MergeError, match="not supported.*flux"):
-        MergePipeline.for_model_type("flux")
+def test_for_model_type_rejects_unknown_type():
+    with pytest.raises(MergeError, match="not supported.*sd3"):
+        MergePipeline.for_model_type("sd3")
 
 
 # caching ----------------------------------------------------------------------------------------------
@@ -278,6 +285,15 @@ def test_recipe_output_dtype(tmp_path, checkpoint_factory):
     pipe.execute_merge_recipe(recipe, out, output_dtype="bf16")
     assert all(t.dtype == torch.bfloat16 for t in load_file(str(out)).values())
     assert json.loads(out.with_suffix(".json").read_text())["output_dtype"] == "bfloat16"
+
+
+def test_batch_merge_method_uses_architecture(tmp_path, checkpoint_factory, monkeypatch):
+    calls = []
+    monkeypatch.setattr(mp, "batch_merge_checkpoints",
+                        lambda *args, **kwargs: calls.append((args, kwargs)) or ["x"])
+    pipe = ZImageMergePipeline(device="cpu")
+    assert pipe.batch_merge("base", ["t"], tmp_path, MergeConfig()) == ["x"]
+    assert calls[0][1] == {"architecture": pipe.architecture}
 
 
 def test_batch_merge_method_end_to_end(tmp_path, checkpoint_factory):

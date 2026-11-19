@@ -287,3 +287,9 @@ def test_batch_merge_output_dtype_metadata(tmp_path, checkpoint_factory):
     meta = json.loads(Path(results[0]).with_suffix(".json").read_text())
     assert meta["output_dtype"] == "bfloat16" and meta["copied_keys"] == 0
 
+
+def test_batch_merge_with_architecture_rejects_wrong_files(tmp_path, checkpoint_factory):
+    from metastable.merge.pipeline import ZIMAGE_ARCHITECTURE
+    with pytest.raises(MergeError, match="does not look like a zimage"):
+        batch_merge_checkpoints(checkpoint_factory("base"), [], tmp_path / "out", MergeConfig(),
+                                architecture=ZIMAGE_ARCHITECTURE)

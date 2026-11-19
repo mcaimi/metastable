@@ -2,13 +2,15 @@
 """
 Model Merging Pipeline
 
-Supports SD1.5, SDXL and Illustrious XL checkpoints with:
+Supports SD1.5, SDXL, Illustrious XL, Flux and Z-Image checkpoints with:
     - Simple 2-model merging
     - Multi-step recipe merging
     - Batch merging of one base with many targets
 
 File-based merges stream tensors (see metastable.merge.stream), so memory
-use stays constant regardless of model size.
+use stays constant regardless of model size. Flux and Z-Image checkpoints
+are transformer-only; in all-in-one files only the transformer is merged and
+the other components are copied from the base.
 """
 
 from dataclasses import dataclass, field
@@ -32,9 +34,11 @@ from metastable.merge.ops import (
     load_checkpoint_dict,
 )
 from metastable.merge.stream import MergeStep, stream_merge
+from metastable.pipelines.flux import FluxPipelineGenerator
 from metastable.pipelines.illustrious import IllustriousPipelineGenerator
 from metastable.pipelines.sd15 import SD15PipelineGenerator
 from metastable.pipelines.sdxl import SDXLPipelineGenerator
+from metastable.pipelines.zimage import ZImagePipelineGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -81,10 +85,41 @@ ILLUSTRIOUS_ARCHITECTURE = ModelArchitectureInfo(
     supported_resolutions=list(IllustriousPipelineGenerator.get_resolutions()),
 )
 
+FLUX_ARCHITECTURE = ModelArchitectureInfo(
+    name="flux",
+    base_resolution=1024,
+    supported_resolutions=list(FluxPipelineGenerator.get_resolutions()),
+    layouts=(
+        ("original", ("double_blocks.0.img_attn.qkv.weight", "single_blocks.0.linear1.weight")),
+        ("diffusers", (
+            "transformer_blocks.0.attn.to_q.weight",
+            "single_transformer_blocks.0.attn.to_q.weight",
+        )),
+    ),
+    transformer_only=True,
+)
+
+ZIMAGE_ARCHITECTURE = ModelArchitectureInfo(
+    name="zimage",
+    base_resolution=1024,
+    supported_resolutions=list(ZImagePipelineGenerator.get_resolutions()),
+    layouts=(
+        ("original", ("layers.0.attention.qkv.weight", "x_embedder.weight")),
+        ("diffusers", ("layers.0.attention.to_q.weight", "all_x_embedder.2-1.weight")),
+    ),
+    transformer_only=True,
+)
+
 # Architectures that support key-by-key checkpoint merging
 ARCHITECTURES: Dict[str, ModelArchitectureInfo] = {
     arch.name: arch
-    for arch in (SD15_ARCHITECTURE, SDXL_ARCHITECTURE, ILLUSTRIOUS_ARCHITECTURE)
+    for arch in (
+        SD15_ARCHITECTURE,
+        SDXL_ARCHITECTURE,
+        ILLUSTRIOUS_ARCHITECTURE,
+        FLUX_ARCHITECTURE,
+        ZIMAGE_ARCHITECTURE,
+    )
 }
 
 
@@ -415,3 +450,16 @@ class IllustriousMergePipeline(MergePipeline):
     def __init__(self, device: str = "auto"):
         super().__init__(architecture=ILLUSTRIOUS_ARCHITECTURE, device=device)
 
+
+class FluxMergePipeline(MergePipeline):
+    """Flux transformer merge pipeline."""
+
+    def __init__(self, device: str = "auto"):
+        super().__init__(architecture=FLUX_ARCHITECTURE, device=device)
+
+
+class ZImageMergePipeline(MergePipeline):
+    """Z-Image (Base and Turbo) transformer merge pipeline."""
+
+    def __init__(self, device: str = "auto"):
+        super().__init__(architecture=ZIMAGE_ARCHITECTURE, device=device)

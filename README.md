@@ -10,8 +10,8 @@ and now extracted so the same engine can power API servers and standalone applic
 - **Devices** – CUDA, ROCm (incl. `gfx_override` for unsupported AMD cards),
   Apple MPS and CPU, with automatic dtype selection
 - **Merging** – linear / SLERP / additive / subtract merges, batch merges and
-  multi-step recipes (SD 1.5, SDXL, Illustrious XL), streamed with constant
-  memory
+  multi-step recipes (SD 1.5, SDXL, Illustrious XL, Flux, Z-Image), streamed
+  with constant memory
 - **Telemetry** (optional) – GPU memory/utilization and host stats
 
 `import metastable` is cheap: heavy dependencies load on first use.
@@ -173,7 +173,8 @@ pipe.batch_merge("base.safetensors", ["a.safetensors", "b.safetensors"],
                  "merged/", MergeConfig(alpha=0.4))
 ```
 
-Supported model types: `sd15`, `sdxl` and `illustrious`.
+Supported model types: `sd15`, `sdxl`, `illustrious`, `flux` and `zimage`
+(Z-Image Base and Turbo).
 
 **`alpha` is always the weight of the target model:**
 
@@ -189,8 +190,8 @@ Supported model types: `sd15`, `sdxl` and `illustrious`.
 
 File merges (`merge()`, recipes, `batch_merge()`) are streamed: tensors are
 read one at a time from memory-mapped inputs and written straight to the
-output, so memory use stays at a few tensors regardless of model size. All
-checkpoints are checked from their headers (keys, shapes,
+output, so memory use stays at a few tensors even for 12B-parameter Flux
+transformers. All checkpoints are checked from their headers (keys, shapes,
 dtypes) before any weights are read. The output is written to a temporary
 file and renamed into place, so a failed merge never leaves a partial file;
 an existing output is renamed to a `.backup_<timestamp>` file first.
@@ -202,6 +203,26 @@ Recipes take it as `execute_merge_recipe(recipe, path, output_dtype=...)`.
 
 fp8 checkpoints are rejected for every model type: merging them would lose
 precision. Use a bf16/fp16/fp32 version of the model.
+
+### Flux and Z-Image
+
+Flux and Z-Image checkpoints hold the diffusion transformer:
+
+- **Key layouts.** Files use either the original/ComfyUI layout (fused
+  `qkv` projections) or the diffusers layout (separate `to_q`/`to_k`/`to_v`).
+  Both inputs must use the same layout; mixing them is rejected. A
+  `model.diffusion_model.` prefix on either file is fine. The output keeps
+  the base file's key names, so a ComfyUI-layout base gives a ComfyUI-layout
+  result.
+- **All-in-one checkpoints.** In files that bundle the transformer (under
+  `model.diffusion_model.`) with a VAE and text encoders, only the
+  transformer is merged. The other components are copied unchanged from the
+  base file (an fp8 text encoder there is fine); the target's are ignored. A
+  transformer-only base gives a transformer-only result.
+- **Model variants.** Z-Image Base and Turbo files can't be told apart, so
+  nothing stops merging them; the result mixes a distilled and a
+  non-distilled model, and the right steps/CFG become unpredictable. Flux
+  dev and schnell checkpoints have different keys and are rejected.
 
 ## Development
 

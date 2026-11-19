@@ -17,14 +17,18 @@ from metastable.merge.ops import (
 )
 from metastable.merge.pipeline import (
     ARCHITECTURES,
+    FLUX_ARCHITECTURE,
     ILLUSTRIOUS_ARCHITECTURE,
     SD15_ARCHITECTURE,
     SDXL_ARCHITECTURE,
+    ZIMAGE_ARCHITECTURE,
+    FluxMergePipeline,
     IllustriousMergePipeline,
     MergePipeline,
     ModelArchitectureInfo,
     SD15MergePipeline,
     SDXLMergePipeline,
+    ZImageMergePipeline,
 )
 from metastable.merge.stream import (
     MergeStep,
@@ -36,6 +40,8 @@ from metastable.merge.stream import (
 __all__ = [
     "ARCHITECTURES",
     "CheckpointInfo",
+    "FLUX_ARCHITECTURE",
+    "FluxMergePipeline",
     "ILLUSTRIOUS_ARCHITECTURE",
     "IllustriousMergePipeline",
     "MergeConfig",
@@ -50,6 +56,8 @@ __all__ = [
     "SafetensorsStreamWriter",
     "StreamMergeResult",
     "TensorEntry",
+    "ZIMAGE_ARCHITECTURE",
+    "ZImageMergePipeline",
     "batch_merge_checkpoints",
     "check_compatible",
     "inspect_checkpoint",

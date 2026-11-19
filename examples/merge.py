@@ -4,7 +4,7 @@ Merge two checkpoints with metastable.
 
     uv run python examples/merge.py sdxl base.safetensors target.safetensors out.safetensors \
         --method slerp --alpha 0.3
-    uv run python examples/merge.py sdxl base.safetensors target.safetensors out.safetensors \
+    uv run python examples/merge.py zimage base.safetensors target.safetensors out.safetensors \
         --alpha 0.4 --output-dtype bf16
 
 alpha is the weight of the *target* model for every method.
