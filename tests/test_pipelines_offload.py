@@ -79,3 +79,33 @@ def test_build_strips_stale_hooks_before_loading_transformer(transformer_spec, m
     assert gen.pipeline.scheduler is not shared["scheduler"]
 
 
+
+# offline transformer config ---------------------------------------------------------------------
+
+def _capture_transformer_kwargs(spec, monkeypatch):
+    captured = {}
+    monkeypatch.setattr(spec.module, spec.shared_loader,
+                        lambda d, dtype: {"scheduler": FlowMatchEulerDiscreteScheduler()})
+    monkeypatch.setattr(spec.module, spec.transformer_class, SimpleNamespace(
+        from_single_file=lambda path, **kw: captured.update(kw) or "transformer"))
+    monkeypatch.setattr(spec.cls, "PIPELINE_CLASS",
+                        staticmethod(lambda transformer, **components: SimpleNamespace(**components)))
+    return captured
+
+
+def test_local_transformer_config_is_used(transformer_spec, monkeypatch, tmp_path, cpu_device):
+    (tmp_path / "transformer").mkdir()
+    (tmp_path / "transformer" / "config.json").write_text("{}")
+    captured = _capture_transformer_kwargs(transformer_spec, monkeypatch)
+
+    transformer_spec.cls("t", tmp_path, device=cpu_device).load_pipeline()
+    assert captured == {"torch_dtype": torch.float32, "config": str(tmp_path),
+                        "subfolder": "transformer"}
+
+
+def test_without_local_config_diffusers_infers_it(transformer_spec, monkeypatch, tmp_path,
+                                                  cpu_device):
+    captured = _capture_transformer_kwargs(transformer_spec, monkeypatch)
+
+    transformer_spec.cls("t", tmp_path, device=cpu_device).load_pipeline()
+    assert captured == {"torch_dtype": torch.float32}

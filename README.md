@@ -79,6 +79,11 @@ on any of them run one at a time, and concurrent requests queue up. Use
 generators (SD 1.5, SDXL, Illustrious) only serialize calls on the same
 generator.
 
+If `components_dir` also contains `transformer/config.json`, it is used to
+load the checkpoint, so loading works offline; otherwise diffusers infers
+the config from the checkpoint keys and may fetch it from the Hugging Face
+Hub.
+
 Flux uses the flow-matching schedulers in `FLOW_MATCH_SCHEDULERS` (renamed
 from `FLUX_SCHEDULERS`; the old name is no longer available).
 `"FlowMatch Heun"` has been removed: the Flux pipelines pass custom sigmas

@@ -79,7 +79,9 @@ class TransformerPipelineGenerator(BasePipelineGenerator):
         Args:
             model_checkpoint: Path to the transformer-only safetensors file
             components_dir: Shared diffusers-format directory holding the
-                text encoder(s), tokenizer(s), VAE and scheduler
+                text encoder(s), tokenizer(s), VAE and scheduler. If it also
+                contains transformer/config.json, that config is used to
+                load the checkpoint instead of one fetched from the Hub.
             device: Explicit device settings (see BasePipelineGenerator)
         """
         super().__init__(model_checkpoint, device=device)
@@ -113,6 +115,18 @@ class TransformerPipelineGenerator(BasePipelineGenerator):
         if self.accelerator != "cpu" and self.dtype_source == "auto":
             self.dtype = torch.bfloat16
 
+    def _transformer_load_kwargs(self) -> Dict[str, Any]:
+        """Keyword arguments for _load_transformer().
+
+        Uses components_dir/transformer/config.json when present, so loading
+        works offline and the checkpoint gets the config that matches it
+        rather than the one diffusers infers from its keys.
+        """
+        kwargs: Dict[str, Any] = {"torch_dtype": self.dtype}
+        if (Path(self.components_dir) / "transformer" / "config.json").is_file():
+            kwargs.update(config=self.components_dir, subfolder="transformer")
+        return kwargs
+
     def _build(self, pipeline_class, label: str):
         """Assemble a pipeline from the checkpoint transformer and the
         shared components.
@@ -135,7 +149,7 @@ class TransformerPipelineGenerator(BasePipelineGenerator):
             label,
             self.model_checkpoint,
         )
-        transformer = self._load_transformer(torch_dtype=self.dtype)
+        transformer = self._load_transformer(**self._transformer_load_kwargs())
         return pipeline_class(transformer=transformer, **shared)
 
     def load_pipeline(self) -> None:
