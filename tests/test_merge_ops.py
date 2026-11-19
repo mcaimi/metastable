@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 import torch
@@ -262,3 +263,33 @@ def test_batch_merge_without_metadata(tmp_path, checkpoint_factory):
 def test_batch_merge_missing_base_raises(tmp_path):
     with pytest.raises(CheckpointLoadError):
         batch_merge_checkpoints(tmp_path / "missing.safetensors", [], tmp_path / "out", MergeConfig())
+
+
+# output_dtype -----------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("value,expected", [
+    (None, None), ("auto", None), ("bf16", torch.bfloat16), ("Float16", torch.float16),
+    ("fp32", torch.float32), (torch.bfloat16, torch.bfloat16),
+])
+def test_config_output_dtype(value, expected):
+    assert MergeConfig(output_dtype=value).output_dtype == expected
+
+
+def test_config_rejects_unknown_output_dtype():
+    with pytest.raises(MergeError, match="output_dtype"):
+        MergeConfig(output_dtype="int4")
+
+
+def test_batch_merge_output_dtype_metadata(tmp_path, checkpoint_factory):
+    results = batch_merge_checkpoints(checkpoint_factory("base"), [checkpoint_factory("t", seed=1)],
+                                      tmp_path / "out", MergeConfig(output_dtype="bf16"))
+    assert all(t.dtype == torch.bfloat16 for t in load_file(results[0]).values())
+    meta = json.loads(Path(results[0]).with_suffix(".json").read_text())
+    assert meta["output_dtype"] == "bfloat16" and meta["copied_keys"] == 0
+
+
+def test_batch_merge_with_architecture_rejects_wrong_files(tmp_path, checkpoint_factory):
+    from metastable.merge.pipeline import ZIMAGE_ARCHITECTURE
+    with pytest.raises(MergeError, match="does not look like a zimage"):
+        batch_merge_checkpoints(checkpoint_factory("base"), [], tmp_path / "out", MergeConfig(),
+                                architecture=ZIMAGE_ARCHITECTURE)

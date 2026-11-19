@@ -1,16 +1,21 @@
 #!/usr/bin/env python
 """
-Model Merging Pipeline for Stable Diffusion
+Model Merging Pipeline
 
-Supports SD1.5, SDXL and Illustrious XL checkpoints with:
+Supports SD1.5, SDXL, Illustrious XL, Flux and Z-Image checkpoints with:
     - Simple 2-model merging
     - Multi-step recipe merging
-    - Checkpoint caching across recipe steps
+    - Batch merging of one base with many targets
+
+File-based merges stream tensors (see metastable.merge.stream), so memory
+use stays constant regardless of model size. Flux and Z-Image checkpoints
+are transformer-only; in all-in-one files only the transformer is merged and
+the other components are copied from the base.
 """
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 import logging
 import time
 
@@ -18,27 +23,48 @@ import torch
 
 from metastable.device import get_device_settings, torch_device_string
 from metastable.exceptions import MergeError
+from metastable.merge.files import read_sidecar, write_sidecar
+from metastable.merge.inspect import check_compatible, inspect_checkpoint
 from metastable.merge.methods import MergeMethod
 from metastable.merge.ops import (
     MergeConfig,
+    _parse_output_dtype,
+    batch_merge_checkpoints,
+    dtype_name,
     load_checkpoint_dict,
-    merge_checkpoints,
-    save_checkpoint,
 )
+from metastable.merge.stream import MergeStep, stream_merge
+from metastable.pipelines.flux import FluxPipelineGenerator
 from metastable.pipelines.illustrious import IllustriousPipelineGenerator
 from metastable.pipelines.sd15 import SD15PipelineGenerator
 from metastable.pipelines.sdxl import SDXLPipelineGenerator
+from metastable.pipelines.zimage import ZImagePipelineGenerator
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class ModelArchitectureInfo:
-    """Information about a model architecture."""
+    """
+    Information about a model architecture.
+
+    Attributes:
+        name: Model type identifier
+        base_resolution: Native training resolution
+        supported_resolutions: Resolution names from the generator
+        layouts: Known key layouts as (name, marker keys); a checkpoint has
+            a layout when all its marker keys are present (prefix
+            stripped). Empty for architectures without layout checks.
+        transformer_only: Checkpoints hold a diffusion transformer only; in
+            all-in-one files (transformer under "model.diffusion_model."
+            next to other components) only the transformer is merged
+    """
 
     name: str
     base_resolution: int
     supported_resolutions: List[str] = field(default_factory=list)
+    layouts: Tuple[Tuple[str, Tuple[str, ...]], ...] = ()
+    transformer_only: bool = False
 
 
 SD15_ARCHITECTURE = ModelArchitectureInfo(
@@ -59,11 +85,41 @@ ILLUSTRIOUS_ARCHITECTURE = ModelArchitectureInfo(
     supported_resolutions=list(IllustriousPipelineGenerator.get_resolutions()),
 )
 
-# Architectures that support key-by-key checkpoint merging. Flux is absent:
-# its transformer-only checkpoints need a dedicated merge path.
+FLUX_ARCHITECTURE = ModelArchitectureInfo(
+    name="flux",
+    base_resolution=1024,
+    supported_resolutions=list(FluxPipelineGenerator.get_resolutions()),
+    layouts=(
+        ("original", ("double_blocks.0.img_attn.qkv.weight", "single_blocks.0.linear1.weight")),
+        ("diffusers", (
+            "transformer_blocks.0.attn.to_q.weight",
+            "single_transformer_blocks.0.attn.to_q.weight",
+        )),
+    ),
+    transformer_only=True,
+)
+
+ZIMAGE_ARCHITECTURE = ModelArchitectureInfo(
+    name="zimage",
+    base_resolution=1024,
+    supported_resolutions=list(ZImagePipelineGenerator.get_resolutions()),
+    layouts=(
+        ("original", ("layers.0.attention.qkv.weight", "x_embedder.weight")),
+        ("diffusers", ("layers.0.attention.to_q.weight", "all_x_embedder.2-1.weight")),
+    ),
+    transformer_only=True,
+)
+
+# Architectures that support key-by-key checkpoint merging
 ARCHITECTURES: Dict[str, ModelArchitectureInfo] = {
     arch.name: arch
-    for arch in (SD15_ARCHITECTURE, SDXL_ARCHITECTURE, ILLUSTRIOUS_ARCHITECTURE)
+    for arch in (
+        SD15_ARCHITECTURE,
+        SDXL_ARCHITECTURE,
+        ILLUSTRIOUS_ARCHITECTURE,
+        FLUX_ARCHITECTURE,
+        ZIMAGE_ARCHITECTURE,
+    )
 }
 
 
@@ -184,15 +240,20 @@ class MergePipeline:
         self,
         recipe: Dict[str, Any],
         output_path: Union[str, Path],
+        output_dtype: Optional[Union[str, torch.dtype]] = None,
     ) -> bool:
         """
         Execute a merge recipe: each step merges the running result with the
         step's target. ADDITIVE/SUBTRACT steps use the original base model as
         the difference reference.
 
+        All checkpoints are validated from their headers first; the steps are
+        then applied tensor by tensor and streamed to output_path.
+
         Args:
             recipe: Recipe dictionary from create_merge_recipe
             output_path: Path to save the final merged model
+            output_dtype: dtype of the merged tensors (see MergeConfig)
 
         Returns:
             True if the result was saved
@@ -201,56 +262,56 @@ class MergePipeline:
             MergeError: If any step fails
         """
         try:
-            base_key = self.load_and_cache_checkpoint(recipe["base_model"])
-            base_weights = self.loaded_checkpoints[base_key]["weights"]
-            current_weights = dict(base_weights)
+            base_info = inspect_checkpoint(recipe["base_model"], self.architecture)
+            targets = [
+                inspect_checkpoint(step["target_model"], self.architecture)
+                for step in recipe["steps"]
+            ]
+            check_compatible(base_info, *targets)
 
+            steps = []
+            for step, target in zip(recipe["steps"], targets):
+                config = MergeConfig(
+                    method=step.get("method", "linear"), alpha=step.get("alpha", 0.5)
+                )
+                steps.append(MergeStep(target, config.method, config.alpha))
+
+            progress_callback = None
+            if any(step.get("show_progress", False) for step in recipe["steps"]):
+                progress_callback = lambda p: logger.debug("Progress: %.1f%%", p * 100)
+
+            logger.info("Executing %d-step merge recipe", len(steps))
+            dtype = _parse_output_dtype(output_dtype)
+            result = stream_merge(
+                base_info,
+                steps,
+                output_path,
+                reference=base_info,
+                device=self.device,
+                output_dtype=dtype,
+                progress_callback=progress_callback,
+            )
+
+            completed_at = time.time()
             recipe_metadata = {
                 "recipe": recipe,
-                "execution_timestamp": time.time(),
-                "steps_executed": [],
-                "architecture": self.architecture.name,
-            }
-
-            for i, step in enumerate(recipe["steps"]):
-                logger.info("Executing merge step %d/%d", i + 1, len(recipe["steps"]))
-
-                target_key = self.load_and_cache_checkpoint(step["target_model"])
-                target_weights = self.loaded_checkpoints[target_key]["weights"]
-
-                progress_callback = None
-                if step.get("show_progress", False):
-                    progress_callback = lambda p: logger.debug(
-                        "Progress: %.1f%%", p * 100
-                    )
-
-                config = MergeConfig(
-                    method=MergeMethod.from_string(step.get("method", "linear")),
-                    alpha=step.get("alpha", 0.5),
-                    device=self.device,
-                    progress_callback=progress_callback,
-                )
-
-                base_reference = None
-                if config.method in (MergeMethod.ADDITIVE, MergeMethod.SUBTRACT):
-                    base_reference = base_weights
-
-                current_weights = merge_checkpoints(
-                    current_weights, target_weights, config, base_reference
-                )
-
-                recipe_metadata["steps_executed"].append(
+                "execution_timestamp": completed_at,
+                "steps_executed": [
                     {
                         "step_index": i,
                         "target_model": str(step["target_model"]),
-                        "method": config.method.value,
-                        "alpha": config.alpha,
-                        "completed_at": time.time(),
+                        "method": merge_step.method.value,
+                        "alpha": merge_step.alpha,
+                        "completed_at": completed_at,
                     }
-                )
-
-            if not save_checkpoint(current_weights, output_path, recipe_metadata):
-                raise MergeError(f"Failed to save merged model to {output_path}")
+                    for i, (step, merge_step) in enumerate(zip(recipe["steps"], steps))
+                ],
+                "architecture": self.architecture.name,
+                "layout": base_info.layout,
+                "output_dtype": dtype_name(dtype),
+                "copied_keys": result.copied_keys,
+            }
+            write_sidecar(output_path, recipe_metadata)
             return True
 
         except MergeError:
@@ -269,7 +330,8 @@ class MergePipeline:
         """
         Merge two checkpoints and save the result.
 
-        Checkpoints are loaded to config.device.
+        Both checkpoints are validated from their headers, then merged tensor
+        by tensor on config.device and streamed to output_path.
 
         Args:
             base_model: Path to base model
@@ -284,10 +346,9 @@ class MergePipeline:
             MergeError: If loading, merging or saving fails
         """
         try:
-            base_weights, base_metadata = load_checkpoint_dict(base_model, config.device)
-            target_weights, target_metadata = load_checkpoint_dict(
-                target_model, config.device
-            )
+            base_info = inspect_checkpoint(base_model, self.architecture)
+            target_info = inspect_checkpoint(target_model, self.architecture)
+            check_compatible(base_info, target_info)
 
             logger.info(
                 "Merging %s with %s using %s",
@@ -295,29 +356,36 @@ class MergePipeline:
                 target_model,
                 config.method.value,
             )
-            merged_weights = merge_checkpoints(base_weights, target_weights, config)
+            result = stream_merge(
+                base_info,
+                [MergeStep(target_info, config.method, config.alpha)],
+                output_path,
+                device=config.device,
+                output_dtype=config.output_dtype,
+                progress_callback=config.progress_callback,
+                chunk_size=config.chunk_size,
+            )
 
-            merged_metadata = None
             if config.preserve_metadata:
-                merged_metadata = {
+                write_sidecar(output_path, {
                     "merge_info": {
                         "base_model": str(base_model),
                         "target_model": str(target_model),
                         "method": config.method.value,
                         "alpha": config.alpha,
+                        "output_dtype": dtype_name(config.output_dtype),
+                        "copied_keys": result.copied_keys,
                         "timestamp": time.time(),
                     },
                     "model_info": {
                         "architecture": self.architecture.name,
+                        "layout": base_info.layout,
                         "base_resolution": self.architecture.base_resolution,
                         "supported_resolutions": self.architecture.supported_resolutions,
                     },
-                    "base_metadata": base_metadata,
-                    "target_metadata": target_metadata,
-                }
-
-            if not save_checkpoint(merged_weights, output_path, merged_metadata):
-                raise MergeError(f"Failed to save merged model to {output_path}")
+                    "base_metadata": read_sidecar(base_model),
+                    "target_metadata": read_sidecar(target_model),
+                })
 
             logger.info("Merged model saved: %s", output_path)
             return str(output_path)
@@ -327,6 +395,23 @@ class MergePipeline:
         except Exception as e:
             logger.error("Merge failed: %s", e)
             raise MergeError(f"Model merge operation failed: {e}") from e
+
+    def batch_merge(
+        self,
+        base_model: Union[str, Path],
+        target_models: List[Union[str, Path]],
+        output_dir: Union[str, Path],
+        config: MergeConfig,
+    ) -> List[str]:
+        """
+        Merge a base checkpoint with each target (see batch_merge_checkpoints).
+
+        Returns:
+            Paths of the merged files that were created
+        """
+        return batch_merge_checkpoints(
+            base_model, target_models, output_dir, config, architecture=self.architecture
+        )
 
     def clear_cache(self) -> None:
         """Clear cached checkpoints to free memory."""
@@ -364,3 +449,17 @@ class IllustriousMergePipeline(MergePipeline):
 
     def __init__(self, device: str = "auto"):
         super().__init__(architecture=ILLUSTRIOUS_ARCHITECTURE, device=device)
+
+
+class FluxMergePipeline(MergePipeline):
+    """Flux transformer merge pipeline."""
+
+    def __init__(self, device: str = "auto"):
+        super().__init__(architecture=FLUX_ARCHITECTURE, device=device)
+
+
+class ZImageMergePipeline(MergePipeline):
+    """Z-Image (Base and Turbo) transformer merge pipeline."""
+
+    def __init__(self, device: str = "auto"):
+        super().__init__(architecture=ZIMAGE_ARCHITECTURE, device=device)

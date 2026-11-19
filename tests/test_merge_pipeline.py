@@ -11,15 +11,19 @@ from metastable.merge import pipeline as mp
 from metastable.merge.ops import MergeConfig
 from metastable.merge.pipeline import (
     ARCHITECTURES,
+    FluxMergePipeline,
     IllustriousMergePipeline,
     MergePipeline,
     SD15MergePipeline,
     SDXLMergePipeline,
+    ZImageMergePipeline,
 )
 from metastable.pipelines import (
+    FluxPipelineGenerator,
     IllustriousPipelineGenerator,
     SD15PipelineGenerator,
     SDXLPipelineGenerator,
+    ZImagePipelineGenerator,
 )
 
 
@@ -31,14 +35,17 @@ def cpu_configured():
 # architectures ---------------------------------------------------------------------------
 
 def test_architectures_registry():
-    assert list(ARCHITECTURES) == ["sd15", "sdxl", "illustrious"]
-    assert "flux" not in ARCHITECTURES
+    assert list(ARCHITECTURES) == ["sd15", "sdxl", "illustrious", "flux", "zimage"]
+    assert not any(ARCHITECTURES[n].transformer_only for n in ("sd15", "sdxl", "illustrious"))
+    assert all(ARCHITECTURES[n].transformer_only for n in ("flux", "zimage"))
 
 
 @pytest.mark.parametrize("name,gen,base_res", [
     ("sd15", SD15PipelineGenerator, 512),
     ("sdxl", SDXLPipelineGenerator, 1024),
     ("illustrious", IllustriousPipelineGenerator, 1024),
+    ("flux", FluxPipelineGenerator, 1024),
+    ("zimage", ZImagePipelineGenerator, 1024),
 ])
 def test_architecture_resolutions_match_generators(name, gen, base_res):
     arch = ARCHITECTURES[name]
@@ -68,14 +75,15 @@ def test_rocm_device_maps_to_cuda_api(monkeypatch):
 
 @pytest.mark.parametrize("cls,name", [
     (SD15MergePipeline, "sd15"), (SDXLMergePipeline, "sdxl"), (IllustriousMergePipeline, "illustrious"),
+    (FluxMergePipeline, "flux"), (ZImageMergePipeline, "zimage"),
 ])
 def test_convenience_classes(cls, name):
     assert cls(device="cpu").architecture.name == name
 
 
-def test_for_model_type_rejects_flux():
-    with pytest.raises(MergeError, match="not supported.*flux"):
-        MergePipeline.for_model_type("flux")
+def test_for_model_type_rejects_unknown_type():
+    with pytest.raises(MergeError, match="not supported.*sd3"):
+        MergePipeline.for_model_type("sd3")
 
 
 # caching ----------------------------------------------------------------------------------------------
@@ -156,12 +164,17 @@ def test_merge_incompatible_raises_merge_error(tmp_path, checkpoint_factory):
             checkpoint_factory("a"), bad, MergeConfig(), tmp_path / "out.safetensors")
 
 
-def test_merge_save_failure(tmp_path, checkpoint_factory, monkeypatch):
-    monkeypatch.setattr(mp, "save_checkpoint", lambda *a, **k: False)
-    with pytest.raises(MergeError, match="Failed to save"):
+def _failing_stream_merge(*args, **kwargs):
+    raise OSError("disk full")
+
+
+def test_merge_write_failure_wrapped(tmp_path, checkpoint_factory, monkeypatch):
+    monkeypatch.setattr(mp, "stream_merge", _failing_stream_merge)
+    out = tmp_path / "out.safetensors"
+    with pytest.raises(MergeError, match="merge operation failed: disk full"):
         SD15MergePipeline(device="cpu").merge(
-            checkpoint_factory("a"), checkpoint_factory("b", seed=1), MergeConfig(),
-            tmp_path / "out.safetensors")
+            checkpoint_factory("a"), checkpoint_factory("b", seed=1), MergeConfig(), out)
+    assert not out.exists() and not out.with_suffix(".json").exists()
 
 
 # recipes -----------------------------------------------------------------------------------------------------
@@ -204,9 +217,9 @@ def test_execute_merge_recipe(tmp_path, checkpoint_factory, state_dict_factory):
     meta = json.loads(out.with_suffix(".json").read_text())
     assert [s["method"] for s in meta["steps_executed"]] == ["linear", "additive"]
     assert [s["alpha"] for s in meta["steps_executed"]] == [0.5, 0.25]
-    # base cache entry is not mutated by the recipe
-    assert torch.equal(pipe.loaded_checkpoints[str(base.absolute())]["weights"]["model.conv.bias"],
-                       a["model.conv.bias"])
+    assert len({s["completed_at"] for s in meta["steps_executed"]}) == 1
+    # streamed recipes don't load checkpoints into the cache
+    assert pipe.get_cache_info()["cache_size"] == 0
 
 
 def test_execute_recipe_defaults(tmp_path, checkpoint_factory, state_dict_factory):
@@ -225,9 +238,65 @@ def test_execute_recipe_missing_target_wrapped(tmp_path, checkpoint_factory):
         pipe.execute_merge_recipe(recipe, tmp_path / "out.safetensors")
 
 
-def test_execute_recipe_save_failure(tmp_path, checkpoint_factory, monkeypatch):
-    monkeypatch.setattr(mp, "save_checkpoint", lambda *a, **k: False)
+def test_execute_recipe_write_failure_wrapped(tmp_path, checkpoint_factory, monkeypatch):
+    monkeypatch.setattr(mp, "stream_merge", _failing_stream_merge)
     pipe = SD15MergePipeline(device="cpu")
     recipe = pipe.create_merge_recipe(checkpoint_factory("base"), [])
-    with pytest.raises(MergeError, match="Failed to save"):
+    with pytest.raises(MergeError, match="Recipe execution failed: disk full"):
         pipe.execute_merge_recipe(recipe, tmp_path / "out.safetensors")
+
+
+# streaming specifics ----------------------------------------------------------------------------
+
+def test_merge_metadata_records_layout_dtype_and_copies(tmp_path, checkpoint_factory):
+    out = tmp_path / "out.safetensors"
+    SDXLMergePipeline(device="cpu").merge(
+        checkpoint_factory("a"), checkpoint_factory("b", seed=1),
+        MergeConfig(output_dtype="float16"), out)
+    meta = json.loads(out.with_suffix(".json").read_text())
+    assert meta["merge_info"]["output_dtype"] == "float16"
+    assert meta["merge_info"]["copied_keys"] == 0
+    assert meta["model_info"]["layout"] is None
+    assert all(t.dtype == torch.float16 for t in load_file(str(out)).values())
+
+
+def test_merge_reads_input_sidecars(tmp_path, checkpoint_factory):
+    a, b = checkpoint_factory("a"), checkpoint_factory("b", seed=1)
+    a.with_suffix(".json").write_text(json.dumps({"origin": "a"}))
+    out = tmp_path / "out.safetensors"
+    SD15MergePipeline(device="cpu").merge(a, b, MergeConfig(), out)
+    meta = json.loads(out.with_suffix(".json").read_text())
+    assert meta["base_metadata"] == {"origin": "a"} and meta["target_metadata"] == {}
+
+
+def test_merge_rejects_fp8_checkpoints(tmp_path, checkpoint_factory, state_dict_factory):
+    sd = state_dict_factory(1)
+    sd["model.linear.weight"] = sd["model.linear.weight"].to(torch.float8_e4m3fn)
+    with pytest.raises(MergeError, match="fp8"):
+        SDXLMergePipeline(device="cpu").merge(
+            checkpoint_factory("a"), checkpoint_factory("b", weights=sd), MergeConfig(),
+            tmp_path / "out.safetensors")
+
+
+def test_recipe_output_dtype(tmp_path, checkpoint_factory):
+    pipe = SD15MergePipeline(device="cpu")
+    recipe = pipe.create_merge_recipe(checkpoint_factory("base"), [{"target_model": checkpoint_factory("t", seed=1)}])
+    out = tmp_path / "out.safetensors"
+    pipe.execute_merge_recipe(recipe, out, output_dtype="bf16")
+    assert all(t.dtype == torch.bfloat16 for t in load_file(str(out)).values())
+    assert json.loads(out.with_suffix(".json").read_text())["output_dtype"] == "bfloat16"
+
+
+def test_batch_merge_method_uses_architecture(tmp_path, checkpoint_factory, monkeypatch):
+    calls = []
+    monkeypatch.setattr(mp, "batch_merge_checkpoints",
+                        lambda *args, **kwargs: calls.append((args, kwargs)) or ["x"])
+    pipe = ZImageMergePipeline(device="cpu")
+    assert pipe.batch_merge("base", ["t"], tmp_path, MergeConfig()) == ["x"]
+    assert calls[0][1] == {"architecture": pipe.architecture}
+
+
+def test_batch_merge_method_end_to_end(tmp_path, checkpoint_factory):
+    results = SD15MergePipeline(device="cpu").batch_merge(
+        checkpoint_factory("base"), [checkpoint_factory("t", seed=1)], tmp_path / "out", MergeConfig())
+    assert results == [str(tmp_path / "out" / "merged_t.safetensors")]
