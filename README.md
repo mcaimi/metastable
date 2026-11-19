@@ -10,7 +10,8 @@ and now extracted so the same engine can power API servers and standalone applic
 - **Devices** – CUDA, ROCm (incl. `gfx_override` for unsupported AMD cards),
   Apple MPS and CPU, with automatic dtype selection
 - **Merging** – linear / SLERP / additive / subtract merges, batch merges and
-  multi-step recipes (SD 1.5, SDXL, Illustrious XL)
+  multi-step recipes (SD 1.5, SDXL, Illustrious XL), streamed with constant
+  memory
 - **Telemetry** (optional) – GPU memory/utilization and host stats
 
 `import metastable` is cheap: heavy dependencies load on first use.
@@ -167,8 +168,12 @@ recipe = pipe.create_merge_recipe("base.safetensors", [
     {"target_model": "b.safetensors", "method": "additive", "alpha": 0.2},
 ])
 pipe.execute_merge_recipe(recipe, "recipe.safetensors")
-pipe.clear_cache()
+
+pipe.batch_merge("base.safetensors", ["a.safetensors", "b.safetensors"],
+                 "merged/", MergeConfig(alpha=0.4))
 ```
+
+Supported model types: `sd15`, `sdxl` and `illustrious`.
 
 **`alpha` is always the weight of the target model:**
 
@@ -181,6 +186,22 @@ pipe.clear_cache()
 
 `reference` defaults to the base. In recipes it is the original base model.
 `MergeConfig(chunk_size=N)` frees accelerator memory every N tensors.
+
+File merges (`merge()`, recipes, `batch_merge()`) are streamed: tensors are
+read one at a time from memory-mapped inputs and written straight to the
+output, so memory use stays at a few tensors regardless of model size. All
+checkpoints are checked from their headers (keys, shapes,
+dtypes) before any weights are read. The output is written to a temporary
+file and renamed into place, so a failed merge never leaves a partial file;
+an existing output is renamed to a `.backup_<timestamp>` file first.
+Provenance goes to a JSON sidecar next to the output.
+
+`MergeConfig(output_dtype="bf16")` (also `float16`, `float32`) sets the dtype
+of the merged tensors; by default each tensor keeps the base model's dtype.
+Recipes take it as `execute_merge_recipe(recipe, path, output_dtype=...)`.
+
+fp8 checkpoints are rejected for every model type: merging them would lose
+precision. Use a bf16/fp16/fp32 version of the model.
 
 ## Development
 

@@ -1,23 +1,25 @@
 #!/usr/bin/env python
 """
-Merge Operations for Stable Diffusion Checkpoints
+Merge Operations for Checkpoints
 
 Provides low-level functions for:
 - Loading checkpoints
 - Validating checkpoint compatibility
-- Merging checkpoint dictionaries
+- Merging checkpoint dictionaries in memory
 - Saving merged results
+- Batch merging files (streamed, see metastable.merge.stream)
 """
 
 import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 from safetensors.torch import load_file, save_file
 
+from metastable.device import _DTYPE_ALIASES
 from metastable.exceptions import CheckpointLoadError, MergeError
 from metastable.merge.files import (
     backup_existing as backup_existing_file,
@@ -26,7 +28,12 @@ from metastable.merge.files import (
     read_sidecar,
     write_sidecar,
 )
+from metastable.merge.inspect import check_compatible, inspect_checkpoint
 from metastable.merge.methods import MergeMethod, merge_tensors
+from metastable.merge.stream import MergeStep, stream_merge
+
+if TYPE_CHECKING:  # pragma: no cover
+    from metastable.merge.pipeline import ModelArchitectureInfo
 
 logger = logging.getLogger(__name__)
 
@@ -41,10 +48,15 @@ class MergeConfig:
     Attributes:
         method: Merge method
         alpha: Weight of the target model (see metastable.merge.methods)
-        device: Device checkpoints are loaded to
+        device: Device the merge runs on (load_checkpoint_dict() loads
+            tensors there; file merges move each tensor there for the math)
         preserve_metadata: Write a JSON sidecar with merge provenance
         chunk_size: Merge this many tensors at a time (None = all at once)
         progress_callback: Called with progress in [0, 1]
+        output_dtype: dtype of the merged tensors in file-based merges
+            ("bfloat16", "float16", "float32" or an alias such as "bf16",
+            or a torch.dtype). None or "auto" keeps each base tensor's
+            dtype. Ignored by the in-memory merge_checkpoints().
     """
     method: MergeMethod = MergeMethod.LINEAR
     alpha: float = 0.5
@@ -52,15 +64,33 @@ class MergeConfig:
     preserve_metadata: bool = True
     chunk_size: Optional[int] = None
     progress_callback: Optional[Callable[[float], None]] = None
+    output_dtype: Optional[Union[str, torch.dtype]] = None
 
     def __post_init__(self) -> None:
         self.method = MergeMethod.from_string(self.method)
+        self.output_dtype = _parse_output_dtype(self.output_dtype)
         try:
             self.alpha = float(self.alpha)
         except (TypeError, ValueError):
             raise MergeError(f"alpha must be a number, got {self.alpha!r}") from None
         if self.chunk_size is not None and self.chunk_size < 1:
             raise MergeError(f"chunk_size must be >= 1, got {self.chunk_size}")
+
+
+def _parse_output_dtype(value: Optional[Union[str, torch.dtype]]) -> Optional[torch.dtype]:
+    if value is None or isinstance(value, torch.dtype):
+        return value
+    key = str(value).strip().lower()
+    if key not in _DTYPE_ALIASES:
+        raise MergeError(
+            f"output_dtype '{value}' is not one of: auto, bfloat16, float16, float32"
+        )
+    return _DTYPE_ALIASES[key]
+
+
+def dtype_name(dtype: Optional[torch.dtype]) -> Optional[str]:
+    """Short name of a torch dtype for metadata ("bfloat16"), or None."""
+    return None if dtype is None else str(dtype).replace("torch.", "")
 
 
 def load_checkpoint_dict(
@@ -248,25 +278,35 @@ def batch_merge_checkpoints(
     checkpoint_list: List[Union[str, Path]],
     output_dir: Union[str, Path],
     config: MergeConfig,
+    architecture: Optional["ModelArchitectureInfo"] = None,
 ) -> List[str]:
     """
     Merge a base checkpoint with multiple other checkpoints.
 
-    Failures on individual targets are logged and skipped.
+    Each merge is streamed tensor by tensor. Failures on individual targets
+    are logged and skipped.
 
     Args:
         base_checkpoint: Path to base checkpoint
         checkpoint_list: List of checkpoint paths to merge with base
         output_dir: Directory for output files (merged_<target stem>.safetensors)
         config: Merge configuration
+        architecture: Architecture of the checkpoints (enables layout checks
+            and all-in-one handling for transformer-only models); None merges
+            every tensor under its own name
 
     Returns:
         List of successfully created output file paths
+
+    Raises:
+        CheckpointLoadError: If the base checkpoint cannot be read
+        MergeError: If the base checkpoint cannot be merged
     """
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    base_weights, base_metadata = load_checkpoint_dict(base_checkpoint, config.device)
+    base_info = inspect_checkpoint(base_checkpoint, architecture)
+    base_metadata = read_sidecar(base_checkpoint)
 
     results = []
 
@@ -274,32 +314,37 @@ def batch_merge_checkpoints(
         try:
             logger.info("Merging %d/%d: %s", i + 1, len(checkpoint_list), target_checkpoint)
 
-            target_weights, target_metadata = load_checkpoint_dict(
-                target_checkpoint, config.device
-            )
-
-            merged_weights = merge_checkpoints(base_weights, target_weights, config)
+            target_info = inspect_checkpoint(target_checkpoint, architecture)
+            check_compatible(base_info, target_info)
 
             target_path = Path(target_checkpoint)
             output_filename = output_path / f"merged_{target_path.stem}.safetensors"
 
-            merged_metadata = None
+            result = stream_merge(
+                base_info,
+                [MergeStep(target_info, config.method, config.alpha)],
+                output_filename,
+                device=config.device,
+                output_dtype=config.output_dtype,
+                progress_callback=config.progress_callback,
+                chunk_size=config.chunk_size,
+            )
+
             if config.preserve_metadata:
-                merged_metadata = {
+                write_sidecar(output_filename, {
                     "base_model": str(base_checkpoint),
                     "target_model": str(target_checkpoint),
                     "merge_method": config.method.value,
                     "merge_alpha": config.alpha,
+                    "output_dtype": dtype_name(config.output_dtype),
+                    "copied_keys": result.copied_keys,
                     "timestamp": time.time(),
                     "base_metadata": base_metadata,
-                    "target_metadata": target_metadata,
-                }
+                    "target_metadata": read_sidecar(target_checkpoint),
+                })
 
-            if save_checkpoint(merged_weights, output_filename, merged_metadata):
-                results.append(str(output_filename))
-                logger.info("Successfully saved: %s", output_filename)
-            else:
-                logger.error("Failed to save: %s", output_filename)
+            results.append(str(output_filename))
+            logger.info("Successfully saved: %s", output_filename)
 
         except Exception as e:
             logger.error("Error merging %s: %s", target_checkpoint, e)
