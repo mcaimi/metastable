@@ -7,7 +7,11 @@ from metastable.pipelines.base import (
     load_custom_unet,
     load_custom_vae,
 )
-from metastable.pipelines.flux import FluxPipelineGenerator, load_flux_shared_components
+from metastable.pipelines.flux import (
+    FluxPipelineGenerator,
+    load_flux_component,
+    load_flux_shared_components,
+)
 from metastable.pipelines.illustrious import IllustriousPipelineGenerator
 from metastable.pipelines.metadata import GenerationMetadata
 from metastable.pipelines.registry import (
@@ -34,5 +38,6 @@ __all__ = [
     "get_generator_class",
     "load_custom_unet",
     "load_custom_vae",
+    "load_flux_component",
     "load_flux_shared_components",
 ]

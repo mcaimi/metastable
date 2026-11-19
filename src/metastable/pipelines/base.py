@@ -355,6 +355,15 @@ class BasePipelineGenerator(ABC):
         """Load the inpainting pipeline."""
         pass
 
+    def _isolate_lora_targets(self, pipeline) -> None:
+        """
+        Ensure the pipeline owns every module a LoRA can modify.
+
+        Called before LoRA weights are loaded and fused into a pipeline.
+        No-op here: single-file pipelines own all their modules. Generators
+        that share cached components across pipelines must override it.
+        """
+
     def add_loras(
         self, loras: Optional[Iterable[Union[LoraSpec, Mapping[str, Any]]]] = None
     ) -> List[str]:
@@ -392,6 +401,7 @@ class BasePipelineGenerator(ABC):
                         adapter_name,
                     )
                     continue
+                self._isolate_lora_targets(pipeline)
                 pipeline.load_lora_weights(Path(spec.path), adapter_name=adapter_name)
                 pipeline.fuse_lora(lora_scale=spec.strength, adapter_name=adapter_name)
                 if adapter_name not in fused:

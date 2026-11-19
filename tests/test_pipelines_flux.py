@@ -185,3 +185,96 @@ def test_inpaint_without_strength_uses_pipeline_default(flux_gen):
     img, mask = Image.new("RGB", (32, 32)), Image.new("L", (32, 32))
     flux_gen.forward_inpaint("p", "n", img, mask, None, 4, 3.5, 1)
     assert "strength" not in flux_gen.inpaint_pipeline.calls[0]
+
+
+# LoRA isolation from shared components ----------------------------------------------------------
+
+class FakeModule:
+    def __init__(self, name):
+        self.name = name
+        self.to_calls = []
+
+    def to(self, device):
+        self.to_calls.append(device)
+        return self
+
+
+@pytest.fixture
+def lora_flux(monkeypatch, fake_pipeline_cls, cpu_device):
+    shared = {name: FakeModule(f"shared:{name}") for name in ("text_encoder", "text_encoder_2", "vae")}
+    loads = []
+
+    def _component(components_dir, name, dtype):
+        loads.append((components_dir, name, dtype))
+        return FakeModule(f"private:{name}")
+
+    monkeypatch.setattr(flux, "load_flux_shared_components", lambda d, dtype: shared)
+    monkeypatch.setattr(flux, "load_flux_component", _component)
+
+    gen = FluxPipelineGenerator("t", "/m/components", device=cpu_device)
+    gen._init_device()
+    gen.pipeline, gen.inpaint_pipeline = fake_pipeline_cls(), fake_pipeline_cls()
+    for p in gen.pipelines:
+        p._lora_loadable_modules = ["transformer", "text_encoder"]
+        p.transformer = FakeModule("transformer")
+        for name, module in shared.items():
+            setattr(p, name, module)
+    return SimpleNamespace(gen=gen, shared=shared, loads=loads)
+
+
+def test_lora_fusion_never_touches_shared_components(lora_flux):
+    gen, shared = lora_flux.gen, lora_flux.shared
+    gen.add_loras([{"path": "/l/style.safetensors", "strength": 0.7}])
+
+    for p in gen.pipelines:
+        assert p.text_encoder is not shared["text_encoder"]
+        assert p.text_encoder.name == "private:text_encoder"
+        assert p.text_encoder_2 is shared["text_encoder_2"]
+        assert p.vae is shared["vae"]
+        assert p.transformer.name == "transformer"
+    assert gen.pipeline.text_encoder is not gen.inpaint_pipeline.text_encoder
+    assert lora_flux.loads == [("/m/components", "text_encoder", torch.float32)] * 2
+
+
+def test_isolation_happens_once_per_pipeline(lora_flux):
+    gen = lora_flux.gen
+    gen.add_loras([{"path": "/l/a.safetensors"}])
+    private = gen.pipeline.text_encoder
+    gen.add_loras([{"path": "/l/b.safetensors"}])
+    assert gen.pipeline.text_encoder is private
+    assert len(lora_flux.loads) == 2
+
+
+def test_already_active_adapter_skips_isolation(lora_flux):
+    gen = lora_flux.gen
+    for p in gen.pipelines:
+        p.active_adapters.append("name_a")
+    assert gen.add_loras([{"path": "/l/a.safetensors"}]) == []
+    assert lora_flux.loads == []
+    assert gen.pipeline.text_encoder is lora_flux.shared["text_encoder"]
+
+
+def test_isolated_component_follows_device_placement(lora_flux):
+    gen = lora_flux.gen
+    gen.to_device()  # cpu host: plain .to()
+    gen.add_loras([{"path": "/l/a.safetensors"}])
+    assert gen.pipeline.text_encoder.to_calls == ["cpu"]
+    assert gen.pipeline.offload_calls == 0
+
+
+def test_isolated_component_reinstalls_offload_hooks(lora_flux):
+    gen = lora_flux.gen
+    gen._placement = "offload"
+    gen.add_loras([{"path": "/l/a.safetensors"}])
+    assert [p.offload_calls for p in gen.pipelines] == [1, 1]
+    assert gen.pipeline.text_encoder.to_calls == []
+
+
+def test_load_flux_component_is_uncached(monkeypatch, tmp_path):
+    loads = []
+    monkeypatch.setattr(flux, "CLIPTextModel", SimpleNamespace(
+        from_pretrained=lambda d, subfolder, **kw: loads.append((subfolder, kw)) or object()))
+    first = flux.load_flux_component(str(tmp_path), "text_encoder", torch.bfloat16)
+    second = flux.load_flux_component(str(tmp_path), "text_encoder", torch.bfloat16)
+    assert first is not second
+    assert loads == [("text_encoder", {"torch_dtype": torch.bfloat16})] * 2
