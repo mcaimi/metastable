@@ -8,6 +8,10 @@ from metastable.device import DeviceSettings
 from metastable.pipelines import flux
 from metastable.pipelines.flux import FluxPipelineGenerator
 from metastable.schedulers import FLUX_SCHEDULERS
+from diffusers import FlowMatchEulerDiscreteScheduler
+
+
+SHARED_SCHEDULER = FlowMatchEulerDiscreteScheduler()
 
 
 class FakeFluxPipelineClass:
@@ -24,7 +28,7 @@ def patched_flux(monkeypatch):
 
     def _shared(components_dir, dtype):
         calls["shared"].append((components_dir, dtype))
-        return {"vae": "vae", "scheduler": "sched", "text_encoder": "te"}
+        return {"vae": "vae", "scheduler": SHARED_SCHEDULER, "text_encoder": "te"}
 
     monkeypatch.setattr(flux, "load_flux_shared_components", _shared)
     monkeypatch.setattr(FluxPipelineGenerator, "PIPELINE_CLASS", type("Txt", (FakeFluxPipelineClass,), {}))
@@ -88,7 +92,9 @@ def test_load_composes_transformer_and_shared_components(patched_flux, loader, a
     pipe = getattr(gen, attr)
     assert getattr(gen, other) is None
     assert pipe.transformer == "transformer:/m/flux.safetensors"
-    assert pipe.components == {"vae": "vae", "scheduler": "sched", "text_encoder": "te"}
+    assert pipe.components["vae"] == "vae" and pipe.components["text_encoder"] == "te"
+    assert isinstance(pipe.components["scheduler"], FlowMatchEulerDiscreteScheduler)
+    assert pipe.components["scheduler"] is not SHARED_SCHEDULER
     assert patched_flux["transformer"] == [("/m/flux.safetensors", {"torch_dtype": torch.bfloat16})]
     assert patched_flux["shared"] == [("/m/components", torch.bfloat16)]
 

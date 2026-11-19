@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple, Union
 
 import torch
+from accelerate.hooks import remove_hook_from_module
 from diffusers import (
     FluxPipeline,
     FluxInpaintPipeline,
@@ -52,6 +53,20 @@ def load_flux_component(components_dir: str, name: str, dtype: torch.dtype):
     component_class = globals()[class_name]
     kwargs = {"torch_dtype": dtype} if takes_dtype else {}
     return component_class.from_pretrained(components_dir, subfolder=subfolder, **kwargs)
+
+
+def _remove_offload_hooks(components: dict) -> None:
+    """Strip accelerate hooks from shared modules.
+
+    A shared module's offload hook references the previous model in the
+    offload chain of the last pipeline that ran (e.g. the VAE's hook holds
+    that pipeline's transformer), keeping it alive after its generator is
+    dropped. Pipelines still using the modules reinstall their hooks before
+    their next run.
+    """
+    for module in components.values():
+        if isinstance(module, torch.nn.Module) and hasattr(module, "_hf_hook"):
+            remove_hook_from_module(module, recurse=True)
 
 
 @lru_cache(maxsize=2)
@@ -122,13 +137,23 @@ class FluxPipelineGenerator(BasePipelineGenerator):
 
     def _build(self, pipeline_class, label: str):
         """Assemble a Flux pipeline from the checkpoint transformer and the
-        shared components."""
+        shared components.
+
+        Stale offload hooks are stripped from the shared modules before the
+        transformer is loaded, so a previous checkpoint's transformer is
+        released first rather than coexisting with the new one in memory.
+        Each pipeline gets its own scheduler: schedulers carry per-run state.
+        """
         self._init_device()
+        shared = dict(load_flux_shared_components(self.components_dir, self.dtype))
+        _remove_offload_hooks(shared)
+        scheduler = shared["scheduler"]
+        shared["scheduler"] = type(scheduler).from_config(scheduler.config)
+
         logger.info("Loading Flux %stransformer checkpoint: %s", label, self.model_checkpoint)
         transformer = FluxTransformer2DModel.from_single_file(
             self.model_checkpoint, torch_dtype=self.dtype
         )
-        shared = load_flux_shared_components(self.components_dir, self.dtype)
         return pipeline_class(transformer=transformer, **shared)
 
     def load_pipeline(self) -> None:
@@ -152,7 +177,7 @@ class FluxPipelineGenerator(BasePipelineGenerator):
             return
 
         for pipeline in self.pipelines:
-            pipeline.enable_model_cpu_offload()
+            self._enable_offload(pipeline)
         self._placement = "offload"
 
     def _isolate_lora_targets(self, pipeline) -> None:
@@ -178,7 +203,7 @@ class FluxPipelineGenerator(BasePipelineGenerator):
 
         if isolated and self._placement == "offload":
             # New modules carry no offload hooks; reinstall them
-            pipeline.enable_model_cpu_offload()
+            self._enable_offload(pipeline)
 
     def forward(
         self,

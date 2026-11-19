@@ -211,6 +211,10 @@ class BasePipelineGenerator(ABC):
         **kwargs,
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
         """Run inference on the given pipeline."""
+        if self._placement == "offload":
+            # Shared modules carry the hooks of whichever pipeline was set
+            # up last; rewire them to this pipeline's offload chain
+            self._enable_offload(pipeline)
         self._set_scheduler(pipeline, scheduler_type)
 
         # Resolve the seed once so the generator and the metadata agree
@@ -415,6 +419,14 @@ class BasePipelineGenerator(ABC):
             pipeline.to(self.torch_device)
         self._placement = "device"
 
+    def _enable_offload(self, pipeline) -> None:
+        """Install model CPU offload hooks targeting the configured device.
+
+        The device is passed explicitly: diffusers otherwise defaults to
+        accelerator 0, ignoring the configured GPU index.
+        """
+        pipeline.enable_model_cpu_offload(device=self.torch_device)
+
     def load_custom_vae(self, vae_checkpoint: Union[str, Path]) -> None:
         """
         Replace the VAE of every loaded pipeline with a custom one.
@@ -436,4 +448,4 @@ class BasePipelineGenerator(ABC):
             pipeline.vae = custom_vae
             if self._placement == "offload":
                 # New modules carry no offload hooks; reinstall them
-                pipeline.enable_model_cpu_offload()
+                self._enable_offload(pipeline)

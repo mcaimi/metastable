@@ -54,6 +54,7 @@ class FakePipeline:
         self.calls: List[Dict[str, Any]] = []
         self.to_calls: List[str] = []
         self.offload_calls = 0
+        self.offload_devices: List[Any] = []
         self.active_adapters: List[str] = []
         self.loaded_loras: List[Any] = []
         self.fused: List[Dict[str, Any]] = []
@@ -71,8 +72,9 @@ class FakePipeline:
         self.to_calls.append(device)
         return self
 
-    def enable_model_cpu_offload(self):
+    def enable_model_cpu_offload(self, device=None):
         self.offload_calls += 1
+        self.offload_devices.append(device)
 
     def get_active_adapters(self):
         return list(self.active_adapters)
