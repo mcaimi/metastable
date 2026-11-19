@@ -14,6 +14,7 @@ from metastable.pipelines.flux import FluxPipelineGenerator
 from metastable.pipelines.illustrious import IllustriousPipelineGenerator
 from metastable.pipelines.sd15 import SD15PipelineGenerator
 from metastable.pipelines.sdxl import SDXLPipelineGenerator
+from metastable.pipelines.zimage import ZImagePipelineGenerator
 
 PIPELINES: Dict[str, Type[BasePipelineGenerator]] = {
     cls.MODEL_TYPE: cls
@@ -22,6 +23,7 @@ PIPELINES: Dict[str, Type[BasePipelineGenerator]] = {
         SDXLPipelineGenerator,
         IllustriousPipelineGenerator,
         FluxPipelineGenerator,
+        ZImagePipelineGenerator,
     )
 }
 
@@ -56,7 +58,7 @@ def create_generator(
     Args:
         model_type: One of available_model_types()
         model_checkpoint: Path to the checkpoint
-        **kwargs: Extra constructor arguments (e.g. components_dir for flux,
-            device for an explicit DeviceSettings)
+        **kwargs: Extra constructor arguments (e.g. components_dir for flux
+            and zimage, device for an explicit DeviceSettings)
     """
     return get_generator_class(model_type)(model_checkpoint, **kwargs)

@@ -8,6 +8,7 @@ from metastable.pipelines import (
     IllustriousPipelineGenerator,
     SD15PipelineGenerator,
     SDXLPipelineGenerator,
+    ZImagePipelineGenerator,
     available_model_types,
     create_generator,
     get_generator_class,
@@ -20,8 +21,9 @@ def test_registry_contents():
         "sdxl": SDXLPipelineGenerator,
         "illustrious": IllustriousPipelineGenerator,
         "flux": FluxPipelineGenerator,
+        "zimage": ZImagePipelineGenerator,
     }
-    assert available_model_types() == ["sd15", "sdxl", "illustrious", "flux"]
+    assert available_model_types() == ["sd15", "sdxl", "illustrious", "flux", "zimage"]
 
 
 def test_keys_match_model_type():
@@ -51,3 +53,15 @@ def test_create_generator_forwards_kwargs():
 def test_create_flux_requires_components_dir():
     with pytest.raises(TypeError):
         create_generator("flux", "/m/f.safetensors")
+
+
+def test_create_zimage_forwards_components_dir():
+    gen = create_generator("zimage", "/m/z.safetensors", components_dir="/m/zc",
+                           device=DeviceSettings.cpu())
+    assert isinstance(gen, ZImagePipelineGenerator)
+    assert gen.components_dir == "/m/zc"
+
+
+def test_create_zimage_requires_components_dir():
+    with pytest.raises(TypeError):
+        create_generator("zimage", "/m/z.safetensors")

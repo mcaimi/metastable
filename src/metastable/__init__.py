@@ -1,7 +1,7 @@
 """
 metastable - Stable Diffusion middleware.
 
-Pipeline generators (SD1.5, SDXL, Illustrious XL, Flux), compute device
+Pipeline generators (SD1.5, SDXL, Illustrious XL, Flux, Z-Image), compute device
 selection and checkpoint merging, usable from API backends and standalone
 applications alike.
 
@@ -33,7 +33,7 @@ _LAZY_EXPORTS = {
     "resolve_device_settings": "metastable.device",
     # schedulers
     "SCHEDULERS": "metastable.schedulers",
-    "FLUX_SCHEDULERS": "metastable.schedulers",
+    "FLOW_MATCH_SCHEDULERS": "metastable.schedulers",
     # seed
     "get_random_seed": "metastable.seed",
     "resolve_seed": "metastable.seed",
@@ -50,6 +50,8 @@ _LAZY_EXPORTS = {
     "PIPELINES": "metastable.pipelines",
     "SD15PipelineGenerator": "metastable.pipelines",
     "SDXLPipelineGenerator": "metastable.pipelines",
+    "TransformerPipelineGenerator": "metastable.pipelines",
+    "ZImagePipelineGenerator": "metastable.pipelines",
     "available_model_types": "metastable.pipelines",
     "create_generator": "metastable.pipelines",
     "get_generator_class": "metastable.pipelines",
@@ -107,9 +109,11 @@ if TYPE_CHECKING:  # pragma: no cover - static analyzers only
         LoraSpec,
         SD15PipelineGenerator,
         SDXLPipelineGenerator,
+        TransformerPipelineGenerator,
+        ZImagePipelineGenerator,
         available_model_types,
         create_generator,
         get_generator_class,
     )
-    from metastable.schedulers import FLUX_SCHEDULERS, SCHEDULERS  # noqa: F401
+    from metastable.schedulers import FLOW_MATCH_SCHEDULERS, SCHEDULERS  # noqa: F401
     from metastable.seed import get_random_seed, resolve_seed  # noqa: F401

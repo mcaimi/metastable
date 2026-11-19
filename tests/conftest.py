@@ -118,3 +118,26 @@ def checkpoint_factory(tmp_path):
         return path
 
     return _make
+
+
+@pytest.fixture(params=["flux", "zimage"])
+def transformer_spec(request):
+    """
+    One transformer-only generator class plus the module-level names its
+    loader hooks resolve (patch them on spec.module).
+    """
+    from metastable.pipelines import flux, zimage
+
+    specs = {
+        "flux": SimpleNamespace(
+            cls=flux.FluxPipelineGenerator, module=flux,
+            shared_loader="load_flux_shared_components",
+            transformer_class="FluxTransformer2DModel",
+        ),
+        "zimage": SimpleNamespace(
+            cls=zimage.ZImagePipelineGenerator, module=zimage,
+            shared_loader="load_zimage_shared_components",
+            transformer_class="ZImageTransformer2DModel",
+        ),
+    }
+    return specs[request.param]

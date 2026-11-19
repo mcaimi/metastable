@@ -9,7 +9,6 @@ from metastable.pipelines.base import (
 )
 from metastable.pipelines.flux import (
     FluxPipelineGenerator,
-    components_lock,
     load_flux_component,
     load_flux_shared_components,
 )
@@ -23,6 +22,12 @@ from metastable.pipelines.registry import (
 )
 from metastable.pipelines.sd15 import SD15PipelineGenerator
 from metastable.pipelines.sdxl import SDXLPipelineGenerator
+from metastable.pipelines.transformer import TransformerPipelineGenerator, components_lock
+from metastable.pipelines.zimage import (
+    ZImagePipelineGenerator,
+    load_zimage_component,
+    load_zimage_shared_components,
+)
 
 __all__ = [
     "BasePipelineGenerator",
@@ -33,6 +38,8 @@ __all__ = [
     "PIPELINES",
     "SD15PipelineGenerator",
     "SDXLPipelineGenerator",
+    "TransformerPipelineGenerator",
+    "ZImagePipelineGenerator",
     "available_model_types",
     "components_lock",
     "create_generator",
@@ -42,4 +49,6 @@ __all__ = [
     "load_custom_vae",
     "load_flux_component",
     "load_flux_shared_components",
+    "load_zimage_component",
+    "load_zimage_shared_components",
 ]
