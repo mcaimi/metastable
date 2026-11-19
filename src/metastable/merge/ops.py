@@ -9,7 +9,6 @@ Provides low-level functions for:
 - Saving merged results
 """
 
-import json
 import logging
 import time
 from dataclasses import dataclass
@@ -20,6 +19,13 @@ import torch
 from safetensors.torch import load_file, save_file
 
 from metastable.exceptions import CheckpointLoadError, MergeError
+from metastable.merge.files import (
+    backup_existing as backup_existing_file,
+    compare_key_shapes,
+    empty_accelerator_cache,
+    read_sidecar,
+    write_sidecar,
+)
 from metastable.merge.methods import MergeMethod, merge_tensors
 
 logger = logging.getLogger(__name__)
@@ -89,14 +95,7 @@ def load_checkpoint_dict(
     try:
         logger.info("Loading checkpoint: %s", checkpoint_path)
         weights = load_file(checkpoint_path, device=device)
-
-        metadata = {}
-        metadata_file = checkpoint_path.with_suffix(".json")
-        if metadata_file.exists():
-            with open(metadata_file, "r") as f:
-                metadata = json.load(f)
-
-        return weights, metadata
+        return weights, read_sidecar(checkpoint_path)
 
     except Exception as e:
         logger.error("Failed to load checkpoint %s: %s", checkpoint_path, e)
@@ -119,26 +118,9 @@ def validate_checkpoints(
     Returns:
         Tuple of (is_valid, list_of_errors)
     """
-    errors = []
-    base_keys = set(base_ckpt.keys())
-
-    for i, ckpt in enumerate(other_ckpts):
-        ckpt_keys = set(ckpt.keys())
-
-        extra_keys = ckpt_keys - base_keys
-        missing_keys = base_keys - ckpt_keys
-
-        if extra_keys:
-            errors.append(f"Checkpoint {i + 1} has extra keys: {sorted(extra_keys)[:5]}...")
-        if missing_keys:
-            errors.append(f"Checkpoint {i + 1} missing keys: {sorted(missing_keys)[:5]}...")
-
-        for key in sorted(base_keys & ckpt_keys):
-            if base_ckpt[key].shape != ckpt[key].shape:
-                errors.append(
-                    f"Shape mismatch for key '{key}': "
-                    f"{tuple(base_ckpt[key].shape)} vs {tuple(ckpt[key].shape)}"
-                )
+    errors = compare_key_shapes(
+        _shapes(base_ckpt), [_shapes(ckpt) for ckpt in other_ckpts]
+    )
 
     for error in errors:
         logger.warning(error)
@@ -150,6 +132,10 @@ def validate_checkpoints(
         logger.error("Checkpoint validation failed with %d errors", len(errors))
 
     return is_valid, errors
+
+
+def _shapes(ckpt: StateDict) -> Dict[str, Tuple[int, ...]]:
+    return {key: tuple(tensor.shape) for key, tensor in ckpt.items()}
 
 
 def merge_checkpoints(
@@ -214,9 +200,7 @@ def merge_checkpoints(
     return merged_dict
 
 
-def _empty_accelerator_cache() -> None:
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+_empty_accelerator_cache = empty_accelerator_cache
 
 
 def save_checkpoint(
@@ -242,22 +226,15 @@ def save_checkpoint(
     try:
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
-        if backup_existing and filepath.exists():
-            backup_path = filepath.with_suffix(
-                f".backup_{time.time_ns()}.safetensors"
-            )
-            filepath.rename(backup_path)
-            logger.info("Created backup: %s", backup_path)
+        if backup_existing:
+            backup_existing_file(filepath)
 
         logger.info("Saving checkpoint: %s", filepath)
         # safetensors refuses non-contiguous tensors
         save_file({k: v.contiguous() for k, v in weights.items()}, filepath)
 
         if metadata:
-            metadata_file = filepath.with_suffix(".json")
-            with open(metadata_file, "w") as f:
-                json.dump(metadata, f, indent=2, default=str)
-            logger.debug("Saved metadata: %s", metadata_file)
+            write_sidecar(filepath, metadata)
 
         return True
 
