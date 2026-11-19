@@ -33,7 +33,7 @@ _LAZY_EXPORTS = {
     "resolve_device_settings": "metastable.device",
     # schedulers
     "SCHEDULERS": "metastable.schedulers",
-    "FLUX_SCHEDULERS": "metastable.schedulers",
+    "FLOW_MATCH_SCHEDULERS": "metastable.schedulers",
     # seed
     "get_random_seed": "metastable.seed",
     "resolve_seed": "metastable.seed",
@@ -111,5 +111,5 @@ if TYPE_CHECKING:  # pragma: no cover - static analyzers only
         create_generator,
         get_generator_class,
     )
-    from metastable.schedulers import FLUX_SCHEDULERS, SCHEDULERS  # noqa: F401
+    from metastable.schedulers import FLOW_MATCH_SCHEDULERS, SCHEDULERS  # noqa: F401
     from metastable.seed import get_random_seed, resolve_seed  # noqa: F401

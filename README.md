@@ -79,6 +79,11 @@ on any of them run one at a time, and concurrent requests queue up. Use
 generators (SD 1.5, SDXL, Illustrious) only serialize calls on the same
 generator.
 
+Flux uses the flow-matching schedulers in `FLOW_MATCH_SCHEDULERS` (renamed
+from `FLUX_SCHEDULERS`; the old name is no longer available).
+`"FlowMatch Heun"` has been removed: the Flux pipelines pass custom sigmas
+to the scheduler, which it does not support.
+
 Inpainting:
 
 ```python

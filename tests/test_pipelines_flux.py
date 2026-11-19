@@ -7,7 +7,7 @@ from PIL import Image
 from metastable.device import DeviceSettings
 from metastable.pipelines import flux
 from metastable.pipelines.flux import FluxPipelineGenerator
-from metastable.schedulers import FLUX_SCHEDULERS
+from metastable.schedulers import FLOW_MATCH_SCHEDULERS
 from diffusers import FlowMatchEulerDiscreteScheduler
 
 
@@ -43,7 +43,7 @@ def _device(backend="cuda", dtype=torch.float16, source="auto"):
 
 def test_class_attributes():
     assert FluxPipelineGenerator.MODEL_TYPE == "flux"
-    assert FluxPipelineGenerator.SCHEDULERS is FLUX_SCHEDULERS
+    assert FluxPipelineGenerator.SCHEDULERS is FLOW_MATCH_SCHEDULERS
     from diffusers import FluxInpaintPipeline, FluxPipeline
     assert FluxPipelineGenerator.PIPELINE_CLASS is FluxPipeline
     assert FluxPipelineGenerator.INPAINT_PIPELINE_CLASS is FluxInpaintPipeline
@@ -160,11 +160,11 @@ def flux_gen(fake_pipeline_cls, cpu_device):
 
 
 def test_forward_passes_true_cfg_scale(flux_gen):
-    flux_gen.forward("p", "n", "FlowMatch Heun", 4, 64, 32, 3.5, 1, true_cfg_scale=2.0)
+    flux_gen.forward("p", "n", "FlowMatch Euler", 4, 64, 32, 3.5, 1, true_cfg_scale=2.0)
     call = flux_gen.pipeline.calls[0]
     assert call["true_cfg_scale"] == 2.0
     assert call["guidance_scale"] == 3.5
-    assert type(flux_gen.pipeline.scheduler).__name__ == "FlowMatchHeunDiscreteScheduler"
+    assert type(flux_gen.pipeline.scheduler).__name__ == "FlowMatchEulerDiscreteScheduler"
 
 
 def test_forward_default_true_cfg_scale(flux_gen):

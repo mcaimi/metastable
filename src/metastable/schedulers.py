@@ -16,7 +16,6 @@ from diffusers.schedulers import (
     HeunDiscreteScheduler,
     LMSDiscreteScheduler,
     FlowMatchEulerDiscreteScheduler,
-    FlowMatchHeunDiscreteScheduler,
 )
 
 
@@ -33,8 +32,8 @@ SCHEDULERS: Dict[str, Type] = {
 
 
 # Flow-matching schedulers for Flux (incompatible with the discrete-noise
-# schedulers above)
-FLUX_SCHEDULERS: Dict[str, Type] = {
+# schedulers above). FlowMatchHeunDiscreteScheduler is not offered: the Flux
+# pipelines pass custom sigmas to set_timesteps(), which it does not accept.
+FLOW_MATCH_SCHEDULERS: Dict[str, Type] = {
     "FlowMatch Euler": FlowMatchEulerDiscreteScheduler,
-    "FlowMatch Heun": FlowMatchHeunDiscreteScheduler,
 }

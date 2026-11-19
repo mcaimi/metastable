@@ -32,7 +32,7 @@ from transformers import CLIPTextModel, CLIPTokenizer, T5EncoderModel, T5Tokeniz
 
 from metastable.device import DeviceSettings
 from metastable.pipelines.base import BasePipelineGenerator
-from metastable.schedulers import FLUX_SCHEDULERS
+from metastable.schedulers import FLOW_MATCH_SCHEDULERS
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +115,7 @@ class FluxPipelineGenerator(BasePipelineGenerator):
     DEFAULT_WIDTH = 1024
     DEFAULT_HEIGHT = 1024
     MODEL_TYPE = "flux"
-    SCHEDULERS = FLUX_SCHEDULERS
+    SCHEDULERS = FLOW_MATCH_SCHEDULERS
 
     def __init__(
         self,
