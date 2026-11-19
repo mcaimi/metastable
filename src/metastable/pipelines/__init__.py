@@ -9,7 +9,6 @@ from metastable.pipelines.base import (
 )
 from metastable.pipelines.flux import (
     FluxPipelineGenerator,
-    components_lock,
     load_flux_component,
     load_flux_shared_components,
 )
@@ -23,6 +22,7 @@ from metastable.pipelines.registry import (
 )
 from metastable.pipelines.sd15 import SD15PipelineGenerator
 from metastable.pipelines.sdxl import SDXLPipelineGenerator
+from metastable.pipelines.transformer import TransformerPipelineGenerator, components_lock
 
 __all__ = [
     "BasePipelineGenerator",
@@ -33,6 +33,7 @@ __all__ = [
     "PIPELINES",
     "SD15PipelineGenerator",
     "SDXLPipelineGenerator",
+    "TransformerPipelineGenerator",
     "available_model_types",
     "components_lock",
     "create_generator",

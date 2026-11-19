@@ -5,22 +5,15 @@ Flux Pipeline Generator
 Unlike SD1.5/SDXL/Illustrious, a Flux checkpoint is not a complete
 single-file pipeline: it only ships the transformer. The CLIP-L + T5-XXL
 text encoders/tokenizers, VAE, and scheduler are loaded once from a shared
-local diffusers-format directory and reused across every Flux checkpoint.
-
-Because those modules are shared, every generator using the same components
-directory also shares one lock: inference, LoRA fusion and placement changes
-on any of them run one at a time (model CPU offload moves shared modules
-between devices, which would break a concurrent run).
+local diffusers-format directory and reused across every Flux checkpoint
+(see TransformerPipelineGenerator for sharing, locking and offload).
 """
 
 import logging
-import threading
 from functools import lru_cache
-from pathlib import Path
-from typing import Dict, Optional, Tuple, Union
+from typing import Dict, Optional, Tuple
 
 import torch
-from accelerate.hooks import remove_hook_from_module
 from diffusers import (
     FluxPipeline,
     FluxInpaintPipeline,
@@ -30,8 +23,11 @@ from diffusers import (
 )
 from transformers import CLIPTextModel, CLIPTokenizer, T5EncoderModel, T5TokenizerFast
 
-from metastable.device import DeviceSettings
-from metastable.pipelines.base import BasePipelineGenerator
+from metastable.pipelines.transformer import (  # noqa: F401 - re-exported
+    TransformerPipelineGenerator,
+    _remove_offload_hooks,
+    components_lock,
+)
 from metastable.schedulers import FLOW_MATCH_SCHEDULERS
 
 logger = logging.getLogger(__name__)
@@ -61,36 +57,6 @@ def load_flux_component(components_dir: str, name: str, dtype: torch.dtype):
     return component_class.from_pretrained(components_dir, subfolder=subfolder, **kwargs)
 
 
-# resolved components directory -> lock shared by its generators
-_COMPONENT_LOCKS: Dict[str, threading.RLock] = {}
-_COMPONENT_LOCKS_GUARD = threading.Lock()
-
-
-def components_lock(components_dir: Union[str, Path]) -> threading.RLock:
-    """Return the lock shared by every generator using components_dir.
-
-    Keyed by the resolved path only (not dtype): a coarser key can only
-    serialize more than needed, never race.
-    """
-    key = str(Path(components_dir).resolve())
-    with _COMPONENT_LOCKS_GUARD:
-        return _COMPONENT_LOCKS.setdefault(key, threading.RLock())
-
-
-def _remove_offload_hooks(components: dict) -> None:
-    """Strip accelerate hooks from shared modules.
-
-    A shared module's offload hook references the previous model in the
-    offload chain of the last pipeline that ran (e.g. the VAE's hook holds
-    that pipeline's transformer), keeping it alive after its generator is
-    dropped. Pipelines still using the modules reinstall their hooks before
-    their next run.
-    """
-    for module in components.values():
-        if isinstance(module, torch.nn.Module) and hasattr(module, "_hf_hook"):
-            remove_hook_from_module(module, recurse=True)
-
-
 @lru_cache(maxsize=2)
 def load_flux_shared_components(components_dir: str, dtype: torch.dtype) -> dict:
     """Load Flux's shared text encoders/tokenizers/VAE/scheduler once.
@@ -98,7 +64,7 @@ def load_flux_shared_components(components_dir: str, dtype: torch.dtype) -> dict
     Cached so the (large) T5-XXL/CLIP/VAE weights are loaded a single time
     per (components_dir, dtype) and reused in-memory across every Flux
     checkpoint swap. The returned modules must never be modified in place:
-    see FluxPipelineGenerator._isolate_lora_targets().
+    see TransformerPipelineGenerator._isolate_lora_targets().
     """
     logger.info("Loading shared Flux components from: %s", components_dir)
     return {
@@ -107,7 +73,7 @@ def load_flux_shared_components(components_dir: str, dtype: torch.dtype) -> dict
     }
 
 
-class FluxPipelineGenerator(BasePipelineGenerator):
+class FluxPipelineGenerator(TransformerPipelineGenerator):
     """Flux Pipeline Generator for text-to-image and inpainting."""
 
     PIPELINE_CLASS = FluxPipeline
@@ -115,24 +81,8 @@ class FluxPipelineGenerator(BasePipelineGenerator):
     DEFAULT_WIDTH = 1024
     DEFAULT_HEIGHT = 1024
     MODEL_TYPE = "flux"
+    DISPLAY_NAME = "Flux"
     SCHEDULERS = FLOW_MATCH_SCHEDULERS
-
-    def __init__(
-        self,
-        model_checkpoint: Union[str, Path],
-        components_dir: Union[str, Path],
-        device: Optional[DeviceSettings] = None,
-    ):
-        """
-        Args:
-            model_checkpoint: Path to the transformer-only safetensors file
-            components_dir: Shared diffusers-format directory holding the
-                text encoders, tokenizers, VAE and scheduler
-            device: Explicit device settings (see BasePipelineGenerator)
-        """
-        super().__init__(model_checkpoint, device=device)
-        self.components_dir: str = str(components_dir)
-        self._lock = components_lock(self.components_dir)
 
     @staticmethod
     def get_resolutions() -> Dict[str, Tuple[int, int]]:
@@ -147,88 +97,16 @@ class FluxPipelineGenerator(BasePipelineGenerator):
             "1152x896": (1152, 896),
         }
 
-    def _init_device(self) -> None:
-        """Initialize GPU/device settings, preferring bf16 for Flux/T5.
+    # Loader hooks resolve the module-level names at call time, so tests
+    # can patch them on this module.
+    def _load_shared_components(self) -> dict:
+        return load_flux_shared_components(self.components_dir, self.dtype)
 
-        bf16 is only auto-selected when the user hasn't pinned a dtype in the
-        device config: ROCm hosts (especially older RDNA GPUs like the RX
-        5500 XT) default to float16, and an explicit dtype always wins.
-        """
-        super()._init_device()
-        if self.accelerator != "cpu" and self.dtype_source == "auto":
-            self.dtype = torch.bfloat16
+    def _load_component(self, name: str):
+        return load_flux_component(self.components_dir, name, self.dtype)
 
-    def _build(self, pipeline_class, label: str):
-        """Assemble a Flux pipeline from the checkpoint transformer and the
-        shared components.
-
-        Stale offload hooks are stripped from the shared modules before the
-        transformer is loaded, so a previous checkpoint's transformer is
-        released first rather than coexisting with the new one in memory.
-        Each pipeline gets its own scheduler: schedulers carry per-run state.
-        """
-        self._init_device()
-        with self._lock:
-            shared = dict(load_flux_shared_components(self.components_dir, self.dtype))
-            _remove_offload_hooks(shared)
-        scheduler = shared["scheduler"]
-        shared["scheduler"] = type(scheduler).from_config(scheduler.config)
-
-        logger.info("Loading Flux %stransformer checkpoint: %s", label, self.model_checkpoint)
-        transformer = FluxTransformer2DModel.from_single_file(
-            self.model_checkpoint, torch_dtype=self.dtype
-        )
-        return pipeline_class(transformer=transformer, **shared)
-
-    def load_pipeline(self) -> None:
-        """Load the Flux generation pipeline."""
-        self.pipeline = self._build(self.PIPELINE_CLASS, "")
-
-    def load_inpaint_pipeline(self) -> None:
-        """Load the Flux inpainting pipeline."""
-        self.inpaint_pipeline = self._build(self.INPAINT_PIPELINE_CLASS, "inpaint ")
-
-    def to_device(self) -> None:
-        """Move pipeline(s) to the configured compute device.
-
-        Flux is large enough that a naive .to(device) often won't fit in
-        consumer VRAM, so model CPU offload is used instead whenever an
-        accelerator is available. enable_model_cpu_offload() raises on a
-        CPU-only host, so fall back to the base behavior there.
-        """
-        if self.accelerator == "cpu":
-            super().to_device()
-            return
-
-        with self._lock:
-            for pipeline in self.pipelines:
-                self._enable_offload(pipeline)
-            self._placement = "offload"
-
-    def _isolate_lora_targets(self, pipeline) -> None:
-        """Give the pipeline private copies of shared LoRA-loadable components.
-
-        Fusing a LoRA rewrites weights in place. Components that are still
-        the cached shared instances (e.g. the CLIP text encoder) are
-        reloaded from disk first, so the fused weights never leak into the
-        cache or into other pipelines. Components a LoRA can't touch (T5,
-        VAE) stay shared.
-        """
-        shared = load_flux_shared_components(self.components_dir, self.dtype)
-        isolated = False
-        for name in getattr(pipeline, "_lora_loadable_modules", ()):
-            if name not in shared or getattr(pipeline, name, None) is not shared[name]:
-                continue
-            logger.info("Loading private Flux %s for LoRA fusion", name)
-            private = load_flux_component(self.components_dir, name, self.dtype)
-            if self._placement == "device":
-                private = private.to(self.torch_device)
-            setattr(pipeline, name, private)
-            isolated = True
-
-        if isolated and self._placement == "offload":
-            # New modules carry no offload hooks; reinstall them
-            self._enable_offload(pipeline)
+    def _load_transformer(self, **kwargs):
+        return FluxTransformer2DModel.from_single_file(self.model_checkpoint, **kwargs)
 
     def forward(
         self,
