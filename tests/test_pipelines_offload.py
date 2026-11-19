@@ -1,4 +1,4 @@
-"""Offload hook ownership between pipelines sharing modules."""
+"""Offload hook ownership between pipelines sharing modules (Flux, Z-Image)."""
 
 from types import SimpleNamespace
 

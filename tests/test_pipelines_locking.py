@@ -1,11 +1,13 @@
-"""Locking between pipelines sharing modules."""
+"""Locking between pipelines sharing modules (Flux, Z-Image)."""
 
 import threading
 
 from diffusers import FlowMatchEulerDiscreteScheduler
 
+from metastable.pipelines.flux import FluxPipelineGenerator
 from metastable.pipelines.sd15 import SD15PipelineGenerator
 from metastable.pipelines.transformer import components_lock
+from metastable.pipelines.zimage import ZImagePipelineGenerator
 
 
 def _gen(spec, fake_pipeline_cls, device, components_dir="/m/components"):
@@ -27,6 +29,12 @@ def test_generators_share_lock_per_components_dir(transformer_spec, tmp_path, mo
     other = transformer_spec.cls("a", tmp_path / "other")
     assert a.lock is b.lock is components_lock(tmp_path / "c")
     assert other.lock is not a.lock
+
+
+def test_flux_and_zimage_components_are_locked_separately(tmp_path):
+    flux_gen = FluxPipelineGenerator("f", tmp_path / "flux")
+    zimage_gen = ZImagePipelineGenerator("z", tmp_path / "zimage")
+    assert flux_gen.lock is not zimage_gen.lock
 
 
 def test_single_file_generators_have_own_lock():

@@ -2,7 +2,7 @@
 """
 Transformer-only Pipeline Generator Base
 
-Base class for architectures (e.g. Flux) whose checkpoints only ship the
+Base class for architectures (Flux, Z-Image) whose checkpoints only ship the
 diffusion transformer. Text encoders, tokenizers, VAE and scheduler are loaded
 once from a shared local diffusers-format directory and reused across every
 checkpoint of that architecture.

@@ -4,8 +4,9 @@ Stable Diffusion middleware: pipeline generators, compute-device selection and
 checkpoint merging, originally developed as part of [sd-api-backend](https://github.com/mcaimi/sd-api-backend)
 and now extracted so the same engine can power API servers and standalone applications.
 
-- **Pipelines** – SD 1.5, SDXL, Illustrious XL and Flux text-to-image and
-  inpainting, LoRA fusion, custom VAEs, scheduler selection
+- **Pipelines** – SD 1.5, SDXL, Illustrious XL, Flux and Z-Image (Base and
+  Turbo) text-to-image and inpainting, LoRA fusion, custom VAEs, scheduler
+  selection
 - **Devices** – CUDA, ROCm (incl. `gfx_override` for unsupported AMD cards),
   Apple MPS and CPU, with automatic dtype selection
 - **Merging** – linear / SLERP / additive / subtract merges, batch merges and
@@ -77,17 +78,45 @@ shares one lock (`gen.lock`): generations, LoRA fusion and placement changes
 on any of them run one at a time, and concurrent requests queue up. Use
 `gen.lock.acquire(blocking=False)` to report "busy" instead. Single-file
 generators (SD 1.5, SDXL, Illustrious) only serialize calls on the same
-generator.
+generator. Generators with different components directories (e.g. Flux and
+Z-Image) are locked separately and may run concurrently, competing for VRAM.
 
 If `components_dir` also contains `transformer/config.json`, it is used to
 load the checkpoint, so loading works offline; otherwise diffusers infers
 the config from the checkpoint keys and may fetch it from the Hugging Face
 Hub.
 
-Flux uses the flow-matching schedulers in `FLOW_MATCH_SCHEDULERS` (renamed
-from `FLUX_SCHEDULERS`; the old name is no longer available).
-`"FlowMatch Heun"` has been removed: the Flux pipelines pass custom sigmas
-to the scheduler, which it does not support.
+Z-Image (Base and Turbo) works the same way, with a components directory in
+the `Tongyi-MAI/Z-Image` or `Tongyi-MAI/Z-Image-Turbo` layout (Qwen3 text
+encoder, tokenizer, VAE, scheduler):
+
+```python
+gen = metastable.create_generator(
+    "zimage", "models/zimage/z_image_turbo_bf16.safetensors",
+    components_dir="models/zimage_turbo_components",
+)
+gen.load_pipeline()
+gen.to_device()
+image, meta = gen.forward("a fox", "", None, 8, 1024, 1024, 0.0, 42)    # Turbo
+```
+
+One `zimage` model type serves both checkpoints; pick the settings to match:
+
+| checkpoint | steps | `cfg` (`guidance_scale`) | negative prompt   |
+|------------|-------|--------------------------|-------------------|
+| Turbo      | ~8    | `0.0`                    | ignored (CFG off) |
+| Base       | 28–50 | ~3–5                     | used              |
+
+CFG is enabled whenever `cfg > 0`. Pair each checkpoint with the components
+directory from its own repository: the text encoder and VAE are identical,
+but the scheduler shift differs (3.0 for Turbo, 6.0 for Base). Each
+directory loads its own copy of the Qwen3 text encoder.
+`forward_inpaint()` takes an optional `strength` (pipeline default 1.0).
+
+Flux and Z-Image use the flow-matching schedulers in `FLOW_MATCH_SCHEDULERS`
+(renamed from `FLUX_SCHEDULERS`; the old name is no longer available).
+`"FlowMatch Heun"` has been removed: both pipelines pass custom sigmas to the
+scheduler, which it does not support.
 
 Inpainting:
 
@@ -121,7 +150,8 @@ auto-detects mps → cuda/rocm → cpu. To override per generator, pass
 `device=DeviceSettings(...)` (e.g. `DeviceSettings.cpu()`) to its constructor
 or to `create_generator()`.
 
-Flux defaults to bfloat16 on accelerators unless `dtype` is set explicitly.
+Flux and Z-Image default to bfloat16 on accelerators unless `dtype` is set
+explicitly.
 
 ## Merging
 

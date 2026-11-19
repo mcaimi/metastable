@@ -1,7 +1,7 @@
 """
 metastable - Stable Diffusion middleware.
 
-Pipeline generators (SD1.5, SDXL, Illustrious XL, Flux), compute device
+Pipeline generators (SD1.5, SDXL, Illustrious XL, Flux, Z-Image), compute device
 selection and checkpoint merging, usable from API backends and standalone
 applications alike.
 
@@ -51,6 +51,7 @@ _LAZY_EXPORTS = {
     "SD15PipelineGenerator": "metastable.pipelines",
     "SDXLPipelineGenerator": "metastable.pipelines",
     "TransformerPipelineGenerator": "metastable.pipelines",
+    "ZImagePipelineGenerator": "metastable.pipelines",
     "available_model_types": "metastable.pipelines",
     "create_generator": "metastable.pipelines",
     "get_generator_class": "metastable.pipelines",
@@ -109,6 +110,7 @@ if TYPE_CHECKING:  # pragma: no cover - static analyzers only
         SD15PipelineGenerator,
         SDXLPipelineGenerator,
         TransformerPipelineGenerator,
+        ZImagePipelineGenerator,
         available_model_types,
         create_generator,
         get_generator_class,

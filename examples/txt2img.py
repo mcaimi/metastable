@@ -5,6 +5,10 @@ Minimal standalone text-to-image app built on metastable.
     uv run python examples/txt2img.py sdxl /path/to/model.safetensors "a lighthouse at dusk"
     uv run python examples/txt2img.py flux /path/to/flux.safetensors "a fox" \
         --components /path/to/flux_components --scheduler "FlowMatch Euler" --cfg 3.5
+    uv run python examples/txt2img.py zimage /path/to/z_image_turbo.safetensors "a fox" \
+        --components /path/to/zimage_turbo_components --steps 8 --cfg 0
+    uv run python examples/txt2img.py zimage /path/to/z_image_base.safetensors "a fox" \
+        --components /path/to/zimage_base_components --steps 30 --cfg 4 --negative "blurry"
 """
 
 import argparse
@@ -23,7 +27,7 @@ def main() -> None:
     parser.add_argument("checkpoint")
     parser.add_argument("prompt")
     parser.add_argument("--negative", default="")
-    parser.add_argument("--components", help="Flux shared components directory")
+    parser.add_argument("--components", help="shared components directory (flux, zimage)")
     parser.add_argument("--scheduler", default=None, help="scheduler name (default: keep the model's)")
     parser.add_argument("--steps", type=int, default=25)
     parser.add_argument("--cfg", type=float, default=7.0)
@@ -38,7 +42,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO)
     metastable.configure_device({"backend": args.backend})
 
-    kwargs = {"components_dir": args.components} if args.model_type == "flux" else {}
+    kwargs = {"components_dir": args.components} if args.model_type in ("flux", "zimage") else {}
     generator = metastable.create_generator(args.model_type, args.checkpoint, **kwargs)
     generator.load_pipeline()
 
