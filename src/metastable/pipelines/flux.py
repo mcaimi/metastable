@@ -6,9 +6,15 @@ Unlike SD1.5/SDXL/Illustrious, a Flux checkpoint is not a complete
 single-file pipeline: it only ships the transformer. The CLIP-L + T5-XXL
 text encoders/tokenizers, VAE, and scheduler are loaded once from a shared
 local diffusers-format directory and reused across every Flux checkpoint.
+
+Because those modules are shared, every generator using the same components
+directory also shares one lock: inference, LoRA fusion and placement changes
+on any of them run one at a time (model CPU offload moves shared modules
+between devices, which would break a concurrent run).
 """
 
 import logging
+import threading
 from functools import lru_cache
 from pathlib import Path
 from typing import Dict, Optional, Tuple, Union
@@ -53,6 +59,22 @@ def load_flux_component(components_dir: str, name: str, dtype: torch.dtype):
     component_class = globals()[class_name]
     kwargs = {"torch_dtype": dtype} if takes_dtype else {}
     return component_class.from_pretrained(components_dir, subfolder=subfolder, **kwargs)
+
+
+# resolved components directory -> lock shared by its generators
+_COMPONENT_LOCKS: Dict[str, threading.RLock] = {}
+_COMPONENT_LOCKS_GUARD = threading.Lock()
+
+
+def components_lock(components_dir: Union[str, Path]) -> threading.RLock:
+    """Return the lock shared by every generator using components_dir.
+
+    Keyed by the resolved path only (not dtype): a coarser key can only
+    serialize more than needed, never race.
+    """
+    key = str(Path(components_dir).resolve())
+    with _COMPONENT_LOCKS_GUARD:
+        return _COMPONENT_LOCKS.setdefault(key, threading.RLock())
 
 
 def _remove_offload_hooks(components: dict) -> None:
@@ -110,6 +132,7 @@ class FluxPipelineGenerator(BasePipelineGenerator):
         """
         super().__init__(model_checkpoint, device=device)
         self.components_dir: str = str(components_dir)
+        self._lock = components_lock(self.components_dir)
 
     @staticmethod
     def get_resolutions() -> Dict[str, Tuple[int, int]]:
@@ -145,8 +168,9 @@ class FluxPipelineGenerator(BasePipelineGenerator):
         Each pipeline gets its own scheduler: schedulers carry per-run state.
         """
         self._init_device()
-        shared = dict(load_flux_shared_components(self.components_dir, self.dtype))
-        _remove_offload_hooks(shared)
+        with self._lock:
+            shared = dict(load_flux_shared_components(self.components_dir, self.dtype))
+            _remove_offload_hooks(shared)
         scheduler = shared["scheduler"]
         shared["scheduler"] = type(scheduler).from_config(scheduler.config)
 
@@ -176,9 +200,10 @@ class FluxPipelineGenerator(BasePipelineGenerator):
             super().to_device()
             return
 
-        for pipeline in self.pipelines:
-            self._enable_offload(pipeline)
-        self._placement = "offload"
+        with self._lock:
+            for pipeline in self.pipelines:
+                self._enable_offload(pipeline)
+            self._placement = "offload"
 
     def _isolate_lora_targets(self, pipeline) -> None:
         """Give the pipeline private copies of shared LoRA-loadable components.

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple, Union
 import logging
+import threading
 
 import numpy as np
 import torch
@@ -159,6 +160,10 @@ class BasePipelineGenerator(ABC):
         # Placement state: None (not placed yet), "device" (moved with
         # .to()), or "offload" (model CPU offload hooks installed)
         self._placement: Optional[str] = None
+        # Serializes inference, LoRA fusion and placement changes. Generators
+        # sharing cached components (e.g. Flux) replace it with a lock shared
+        # by every generator using the same components.
+        self._lock: threading.RLock = threading.RLock()
 
     @staticmethod
     @abstractmethod
@@ -170,6 +175,17 @@ class BasePipelineGenerator(ABC):
     def pipelines(self) -> List[DiffusionPipeline]:
         """The currently loaded pipelines (txt2img and/or inpaint)."""
         return [p for p in (self.pipeline, self.inpaint_pipeline) if p is not None]
+
+    @property
+    def lock(self) -> threading.RLock:
+        """
+        The lock held during inference, LoRA fusion and placement changes.
+
+        Shared by every generator whose pipelines share modules, so they
+        never run concurrently. Applications may acquire it non-blocking to
+        report "busy" instead of queueing.
+        """
+        return self._lock
 
     def _init_device(self) -> None:
         """Initialize GPU/device settings.
@@ -210,20 +226,21 @@ class BasePipelineGenerator(ABC):
         seed: int,
         **kwargs,
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
-        """Run inference on the given pipeline."""
-        if self._placement == "offload":
-            # Shared modules carry the hooks of whichever pipeline was set
-            # up last; rewire them to this pipeline's offload chain
-            self._enable_offload(pipeline)
-        self._set_scheduler(pipeline, scheduler_type)
+        """Run inference on the given pipeline (holding self.lock)."""
+        with self._lock:
+            if self._placement == "offload":
+                # Shared modules carry the hooks of whichever pipeline was
+                # set up last; rewire them to this pipeline's offload chain
+                self._enable_offload(pipeline)
+            self._set_scheduler(pipeline, scheduler_type)
 
-        # Resolve the seed once so the generator and the metadata agree
-        actual_seed = resolve_seed(seed)
-        gen = self._create_generator(actual_seed)
+            # Resolve the seed once so the generator and the metadata agree
+            actual_seed = resolve_seed(seed)
+            gen = self._create_generator(actual_seed)
 
-        prediction = pipeline(
-            prompt=prompt, negative_prompt=negative_prompt, generator=gen, **kwargs
-        )
+            prediction = pipeline(
+                prompt=prompt, negative_prompt=negative_prompt, generator=gen, **kwargs
+            )
         image = np.array(prediction.images[0])
 
         # Report the real output size (inpaint pipelines infer it from the
@@ -394,30 +411,32 @@ class BasePipelineGenerator(ABC):
             raise PipelineError("No pipeline loaded to add LoRAs to")
 
         fused: List[str] = []
-        for spec in specs:
-            adapter_name = spec.adapter_name
-            logger.info("Loading LoRA: %s (strength: %.2f)", spec.path, spec.strength)
+        with self._lock:
+            for spec in specs:
+                adapter_name = spec.adapter_name
+                logger.info("Loading LoRA: %s (strength: %.2f)", spec.path, spec.strength)
 
-            for pipeline in self.pipelines:
-                if adapter_name in pipeline.get_active_adapters():
-                    logger.info(
-                        "LoRA Loader: %s: adapter already loaded in the pipeline",
-                        adapter_name,
-                    )
-                    continue
-                self._isolate_lora_targets(pipeline)
-                pipeline.load_lora_weights(Path(spec.path), adapter_name=adapter_name)
-                pipeline.fuse_lora(lora_scale=spec.strength, adapter_name=adapter_name)
-                if adapter_name not in fused:
-                    fused.append(adapter_name)
+                for pipeline in self.pipelines:
+                    if adapter_name in pipeline.get_active_adapters():
+                        logger.info(
+                            "LoRA Loader: %s: adapter already loaded in the pipeline",
+                            adapter_name,
+                        )
+                        continue
+                    self._isolate_lora_targets(pipeline)
+                    pipeline.load_lora_weights(Path(spec.path), adapter_name=adapter_name)
+                    pipeline.fuse_lora(lora_scale=spec.strength, adapter_name=adapter_name)
+                    if adapter_name not in fused:
+                        fused.append(adapter_name)
 
         return fused
 
     def to_device(self) -> None:
         """Move pipeline(s) to the configured compute device."""
-        for pipeline in self.pipelines:
-            pipeline.to(self.torch_device)
-        self._placement = "device"
+        with self._lock:
+            for pipeline in self.pipelines:
+                pipeline.to(self.torch_device)
+            self._placement = "device"
 
     def _enable_offload(self, pipeline) -> None:
         """Install model CPU offload hooks targeting the configured device.
@@ -444,8 +463,9 @@ class BasePipelineGenerator(ABC):
         if self._placement == "device":
             custom_vae = custom_vae.to(self.torch_device)
 
-        for pipeline in self.pipelines:
-            pipeline.vae = custom_vae
-            if self._placement == "offload":
-                # New modules carry no offload hooks; reinstall them
-                self._enable_offload(pipeline)
+        with self._lock:
+            for pipeline in self.pipelines:
+                pipeline.vae = custom_vae
+                if self._placement == "offload":
+                    # New modules carry no offload hooks; reinstall them
+                    self._enable_offload(pipeline)

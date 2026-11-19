@@ -9,6 +9,7 @@ from metastable.pipelines.base import (
 )
 from metastable.pipelines.flux import (
     FluxPipelineGenerator,
+    components_lock,
     load_flux_component,
     load_flux_shared_components,
 )
@@ -33,6 +34,7 @@ __all__ = [
     "SD15PipelineGenerator",
     "SDXLPipelineGenerator",
     "available_model_types",
+    "components_lock",
     "create_generator",
     "format_metadata",
     "get_generator_class",
